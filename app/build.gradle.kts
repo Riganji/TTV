@@ -13,13 +13,42 @@ android {
         applicationId = "com.example.teliktv"
         minSdk = 26            // java.util.Base64 (парсер) — с API 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.2.1"
+    }
+
+    /**
+     * Постоянный ключ подписи. Без него каждая сборка (особенно в CI, где debug.keystore
+     * создаётся заново) подписана другим ключом, и установка поверх падает.
+     * Ключ берётся из keystore.properties или из переменных окружения (секреты GitHub).
+     */
+    signingConfigs {
+        create("app") {
+            val props = java.util.Properties().apply {
+                val f = rootProject.file("keystore.properties")
+                if (f.exists()) f.inputStream().use { load(it) }
+            }
+            fun value(key: String, env: String): String? =
+                props.getProperty(key) ?: System.getenv(env)
+
+            val path = value("storeFile", "KEYSTORE_FILE")
+            if (path != null && file(path).exists()) {
+                storeFile = file(path)
+                storePassword = value("storePassword", "KEYSTORE_PASSWORD")
+                keyAlias = value("keyAlias", "KEY_ALIAS")
+                keyPassword = value("keyPassword", "KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
+        val appSigning = signingConfigs.getByName("app")
+        debug {
+            if (appSigning.storeFile != null) signingConfig = appSigning
+        }
         release {
             isMinifyEnabled = false
+            signingConfig = if (appSigning.storeFile != null) appSigning else signingConfigs.getByName("debug")
         }
     }
     compileOptions {

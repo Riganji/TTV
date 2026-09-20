@@ -18,8 +18,21 @@ data class EpgData(
 /** Хелперы для показа передач. Списки передач отсортированы по началу. */
 object Epg {
     private val HHMM: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+    private val DDMM: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMMM")
 
     fun time(ms: Long): String = HHMM.withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(ms))
+
+    /** Локальная дата в виде числа — чтобы сравнивать «тот же день». */
+    fun day(ms: Long): Long =
+        Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()).toLocalDate().toEpochDay()
+
+    /** «Сегодня» / «Завтра» / «21 сентября» — заголовок дня в оверлее телепрограммы. */
+    fun dayLabel(ms: Long, now: Long): String = when (day(ms) - day(now)) {
+        0L -> "Сегодня"
+        1L -> "Завтра"
+        -1L -> "Вчера"
+        else -> DDMM.withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(ms))
+    }
 
     fun current(list: List<Programme>?, now: Long): Programme? =
         list?.firstOrNull { it.start <= now && now < it.stop }

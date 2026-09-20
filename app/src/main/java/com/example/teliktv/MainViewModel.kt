@@ -135,10 +135,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (chans.isEmpty()) return
         val now = System.currentTimeMillis()
         val have = _epg.value
-        val fresh = have.updatedAt > 0 && now - have.updatedAt < Config.EPG_TTL_MS
-        // Кэш свежий и покрывает все текущие каналы — сеть не трогаем.
-        if (!force && fresh && chans.all { !have.bySlug[it.slug].isNullOrEmpty() }) {
-            _epgStatus.value = EpgStatus(matched = chans.size, total = chans.size)
+        val fresh = have.updatedAt > 0 && now - have.updatedAt < EpgConfig.TTL_MS
+        // Каналов без маппинга телепрограммы просто нет в источнике — их не ждём.
+        val expected = chans.filter { it.slug in EpgConfig.CHANNEL_MAP }
+        // Кэш свежий и покрывает всё, что вообще может прийти — сеть не трогаем.
+        if (!force && fresh && expected.all { !have.bySlug[it.slug].isNullOrEmpty() }) {
+            _epgStatus.value = EpgStatus(matched = expected.size, total = chans.size)
             return
         }
         if (!force && fresh) {
@@ -147,7 +149,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         _epgStatus.value = _epgStatus.value.copy(loading = true, error = null)
         try {
-            val cache = epgRepo.download(chans.map { it.slug to it.title }, now)
+            // Передачи подставляются в UI по мере готовности каналов.
+            val partial = LinkedHashMap<String, List<Programme>>(_epg.value.bySlug)
+            val cache = epgRepo.download(now) { slug, programmes ->
+                partial[slug] = programmes
+                _epg.update { it.copy(bySlug = LinkedHashMap(partial), updatedAt = now, source = EpgConfig.BASE) }
+            }
             withContext(Dispatchers.IO) { epgRepo.save(cache) }
             applyEpg(cache)
         } catch (e: CancellationException) {

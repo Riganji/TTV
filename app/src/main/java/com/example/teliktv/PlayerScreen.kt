@@ -45,6 +45,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
@@ -59,13 +62,14 @@ import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private enum class PlayerPanel { None, Channels, Groups, Streams }
+private enum class PlayerPanel { None, Channels, Groups, Streams, Epg }
 
 /**
  * Управление пультом (панели закрыты):
  *  ↑ / ↓ (и CH+/CH−)  — предыдущий / следующий канал в текущей группе
  *  ←                  — список каналов (ещё раз ← — категории, включая «Избранное»)
- *  → / Menu           — выбор потока
+ *  →                  — телепрограмма текущего канала
+ *  Menu               — выбор потока
  *  OK                 — карточка «сейчас / далее» из телепрограммы
  *  Назад              — закрыть панель / выйти в список
  * Если поток не открылся или не стартует за Config.STREAM_TIMEOUT_MS — автоматически включается
@@ -120,6 +124,7 @@ fun PlayerScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var reloading by remember { mutableStateOf(false) }
     var nonce by remember { mutableIntStateOf(0) }
+    var inBackground by remember { mutableStateOf(false) }   // Home / экран выключен
     var retried by remember { mutableStateOf(emptySet<String>()) }
 
     // ---- действия
@@ -193,8 +198,25 @@ fun PlayerScreen(
         onDispose { exo.removeListener(listener) }
     }
 
+    // Нажали «Домой» / погас экран — останавливаем воспроизведение и сеть; вернулись — заново на «прямой эфир».
+    val lifecycleOwner = context as? LifecycleOwner
+    DisposableEffect(lifecycleOwner, exo) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                inBackground = true
+                exo.stop()
+            } else if (event == Lifecycle.Event.ON_START && inBackground) {
+                inBackground = false
+                nonce++   // перезапускает LaunchedEffect ниже: новый источник, prepare, play
+            }
+        }
+        lifecycleOwner?.lifecycle?.addObserver(observer)
+        onDispose { lifecycleOwner?.lifecycle?.removeObserver(observer) }
+    }
+
     LaunchedEffect(slug, stream?.url, nonce) {
         error = null
+        if (inBackground) return@LaunchedEffect
         if (stream == null) {
             exo.stop()
             return@LaunchedEffect
@@ -204,7 +226,7 @@ fun PlayerScreen(
         exo.playWhenReady = true
         // «Висящий» поток без ошибки тоже считаем нерабочим.
         delay(Config.STREAM_TIMEOUT_MS)
-        if (exo.playbackState != Player.STATE_READY) {
+        if (!inBackground && exo.playbackState != Player.STATE_READY) {
             onStreamFailed("нет ответа за ${Config.STREAM_TIMEOUT_MS / 1000} с")
         }
     }
@@ -223,16 +245,15 @@ fun PlayerScreen(
     }
     LaunchedEffect(detail) {
         if (detail) {
-            delay(8000)
+            delay(Config.OVERLAY_TIMEOUT_MS)
             detail = false
         }
     }
+    // Любой оверлей закрывается сам через Config.OVERLAY_TIMEOUT_MS без нажатий (touch сбрасывает отсчёт).
     LaunchedEffect(panel, touch) {
-        when (panel) {
-            PlayerPanel.Streams -> { delay(7000); panel = PlayerPanel.None }
-            PlayerPanel.Channels, PlayerPanel.Groups -> { delay(20000); panel = PlayerPanel.None }
-            PlayerPanel.None -> {}
-        }
+        if (panel == PlayerPanel.None) return@LaunchedEffect
+        delay(Config.OVERLAY_TIMEOUT_MS)
+        panel = PlayerPanel.None
     }
 
     // ---- фокус и клавиши
@@ -270,7 +291,8 @@ fun PlayerScreen(
                         touch++
                         true
                     }
-                    Key.DirectionRight, Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
+                    Key.DirectionRight -> { panel = PlayerPanel.Epg; touch++; true }
+                    Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
                     Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> { detail = !detail; true }
                     else -> false
                 }
@@ -342,7 +364,7 @@ fun PlayerScreen(
                 } else if (err != null) {
                     Txt(err, size = 22.sp, color = ErrorRed)
                     Spacer(Modifier.height(6.dp))
-                    Txt("→ выбрать поток вручную, ↑ ↓ другой канал", size = 18.sp, color = TextDim)
+                    Txt("Menu — выбрать поток вручную, ↑ ↓ другой канал", size = 18.sp, color = TextDim)
                 }
             }
         }
@@ -413,7 +435,34 @@ fun PlayerScreen(
             )
         }
 
-        // Выбор потока (→)
+        // Телепрограмма текущего канала (→)
+        if (panel == PlayerPanel.Epg) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .onPreviewKeyEvent { ev ->
+                        if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        if (ev.key == Key.DirectionLeft) {
+                            panel = PlayerPanel.None
+                            true
+                        } else {
+                            false
+                        }
+                    },
+            ) {
+                EpgOverlay(
+                    channel = channel,
+                    slug = slug,
+                    logo = logo,
+                    programmes = programmes,
+                    now = now,
+                    onActivity = { touch++ },
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                )
+            }
+        }
+
+        // Выбор потока (Menu)
         if (panel == PlayerPanel.Streams) {
             val selectedFocus = remember { FocusRequester() }
             LaunchedEffect(Unit) {

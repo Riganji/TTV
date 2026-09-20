@@ -39,30 +39,14 @@ object Config {
 
     val ALL_SLUGS: List<String> = GROUPS.flatMap { it.second }
 
-    // ------------------------------------------------------------------ EPG (XMLTV)
+    // ------------------------------------------------------------------ EPG
 
-    /**
-     * Источники телепрограммы в формате XMLTV (можно .xml или .xml.gz). Пробуются по порядку,
-     * берётся первый, где нашлись наши каналы. Если адреса устарели — замените на рабочие.
-     */
-    val EPG_URLS: List<String> = listOf(
-        "https://iptvx.one/EPG",
-        "https://iptvx.one/epg/epg.xml.gz",
-    )
-
-    /**
-     * Ручное сопоставление, если название канала на telik.live не совпадает с названием в XMLTV:
-     * slug -> список названий/id из XMLTV, например "kino-tv" to listOf("Кино ТВ", "kinotv.ru").
-     */
-    val EPG_ALIASES: Map<String, List<String>> = emptyMap()
-
-    /** Как долго кэш телепрограммы считается свежим. */
-    const val EPG_TTL_MS = 6 * 60 * 60 * 1000L
-
-    /** Программа хранится в окне [сейчас - 2 ч; сейчас + 36 ч]. */
-    const val EPG_PAST_MS = 2 * 60 * 60 * 1000L
-    const val EPG_FUTURE_MS = 36 * 60 * 60 * 1000L
+    // Телепрограмма берётся постранично с programma-peredach.com — см. EpgConfig.kt.
+    // Общий XMLTV (iptvx.one и т.п.) больше не используется.
 
     /** Сколько ждать старта потока, прежде чем считать его нерабочим и переключиться на следующий. */
     const val STREAM_TIMEOUT_MS = 20_000L
+
+    /** Любой оверлей поверх видео закрывается сам через это время без нажатий. */
+    const val OVERLAY_TIMEOUT_MS = 30_000L
 }
