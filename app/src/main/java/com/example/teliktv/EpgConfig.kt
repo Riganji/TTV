@@ -31,9 +31,11 @@ object EpgConfig {
         "kinopokaz" to "kinopokaz",
         "kinosat" to "kinosat",
         "komedijnoe" to "komedijnoe",
+		"dom-kino" to "dom-kino",
         "lyubimoe-kino" to "lyubimoe-kino",
         "tv-xxi" to "tv-xxi",
         "hollywood" to "hollywood",
+        "trash-tv" to "trash",
         "ostrosyuzhetnoe-hd" to "ostrosyuzhetnoe-hd",
         "sony-sci-fi" to "sony-sci-fi",
         "sony-turbo" to "sony-turbo",
@@ -68,11 +70,7 @@ object EpgConfig {
         "rossiya-1" to "rossija-1",
         "ntv" to "ntv",
         "ren-tv" to "ren-tv",
-        "tv-tsentr" to "tvc",
         "pyatyj-kanal" to "pjatyj",
-        "rbk-tv" to "rbk",
         "rossiya-24" to "rossija-24",
-        "izvestiya" to "izvestiya",
-        "tass" to "tass",
     )
 }

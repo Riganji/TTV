@@ -18,8 +18,8 @@ object Config {
     /** Группы (название -> slug'и страниц telik.live/<slug>.html). Порядок = порядок в списке. */
     val GROUPS: List<Pair<String, List<String>>> = listOf(
         "Кино" to listOf(
-            "kino-tv", "hit-hd", "kinopokaz", "kinosat", "komedijnoe", "fantastica-hd",
-            "lyubimoe-kino", "tv-xxi", "hollywood", "strah-hd", "ostrosyuzhetnoe-hd",
+            "kino-tv", "hit-hd", "kinopokaz", "kinosat", "komedijnoe", "dom-kino",
+            "lyubimoe-kino", "tv-xxi", "hollywood", "trash-tv", "ostrosyuzhetnoe-hd",
             "sony-sci-fi", "illyuzion", "sony-turbo", "strashnoe-hd", "shokiruyushchee",
         ),
         "Fresh" to listOf(
@@ -34,7 +34,7 @@ object Config {
             "history-channel", "history-2", "national-geographic", "discovery-channel",
             "viasat-history", "nat-geo-wild", "id-investigation-discovery", "muzhskoj", "avto24",
         ),
-        "Другое" to listOf("pervyj-kanal", "rossiya-1", "ntv", "ren-tv", "tv-tsentr", "pyatyj-kanal", "rbk-tv", "rossiya-24", "izvestiya", "tass"),
+        "Другое" to listOf("pervyj-kanal", "rossiya-1", "ntv", "ren-tv", "pyatyj-kanal", "rossiya-24"),
     )
 
     val ALL_SLUGS: List<String> = GROUPS.flatMap { it.second }

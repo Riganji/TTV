@@ -46,7 +46,7 @@ import kotlin.math.sin
 
 // Палитра: чернильный фон и один тёплый янтарный акцент — на ТВ фокус должен читаться с дивана.
 val Ink = Color(0xFF0D1014)
-val PanelBg = Color(0xFF151A21)
+val PanelBg = Color(0xFF212934)
 val PanelSelected = Color(0xFF232B36)
 val Amber = Color(0xFFF2B33D)
 val OnAmber = Color(0xFF16110A)
