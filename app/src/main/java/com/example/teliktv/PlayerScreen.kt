@@ -59,7 +59,7 @@ import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private enum class Panel { None, Channels, Groups, Streams }
+private enum class PlayerPanel { None, Channels, Groups, Streams }
 
 /**
  * Управление пультом (панели закрыты):
@@ -111,7 +111,7 @@ fun PlayerScreen(
     val programmes = epg.bySlug[slug]
     val nowProg = Epg.current(programmes, now)
 
-    var panel by remember { mutableStateOf(Panel.None) }
+    var panel by remember { mutableStateOf(PlayerPanel.None) }
     var panelGroup by remember { mutableIntStateOf(startGroup) }
     var touch by remember { mutableIntStateOf(0) }
     var brief by remember { mutableStateOf(true) }
@@ -229,16 +229,16 @@ fun PlayerScreen(
     }
     LaunchedEffect(panel, touch) {
         when (panel) {
-            Panel.Streams -> { delay(7000); panel = Panel.None }
-            Panel.Channels, Panel.Groups -> { delay(20000); panel = Panel.None }
-            Panel.None -> {}
+            PlayerPanel.Streams -> { delay(7000); panel = PlayerPanel.None }
+            PlayerPanel.Channels, PlayerPanel.Groups -> { delay(20000); panel = PlayerPanel.None }
+            PlayerPanel.None -> {}
         }
     }
 
     // ---- фокус и клавиши
     val rootFocus = remember { FocusRequester() }
     LaunchedEffect(panel) {
-        if (panel == Panel.None) {
+        if (panel == PlayerPanel.None) {
             try {
                 rootFocus.requestFocus()
             } catch (e: Exception) {
@@ -248,8 +248,8 @@ fun PlayerScreen(
     }
     BackHandler {
         when {
-            panel == Panel.Groups -> panel = Panel.Channels
-            panel != Panel.None -> panel = Panel.None
+            panel == PlayerPanel.Groups -> panel = PlayerPanel.Channels
+            panel != PlayerPanel.None -> panel = PlayerPanel.None
             detail -> detail = false
             else -> onExit()
         }
@@ -260,17 +260,17 @@ fun PlayerScreen(
             .fillMaxSize()
             .background(Color.Black)
             .onPreviewKeyEvent { ev ->
-                if (panel != Panel.None || ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                if (panel != PlayerPanel.None || ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 when (ev.key) {
                     Key.DirectionUp, Key.ChannelUp, Key.PageUp -> { zap(-1); true }
                     Key.DirectionDown, Key.ChannelDown, Key.PageDown -> { zap(1); true }
                     Key.DirectionLeft -> {
                         panelGroup = playGroup
-                        panel = Panel.Channels
+                        panel = PlayerPanel.Channels
                         touch++
                         true
                     }
-                    Key.DirectionRight, Key.Menu -> { panel = Panel.Streams; touch++; true }
+                    Key.DirectionRight, Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
                     Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> { detail = !detail; true }
                     else -> false
                 }
@@ -293,7 +293,7 @@ fun PlayerScreen(
         )
 
         // Короткая плашка после переключения
-        if (brief && panel == Panel.None && !detail && channel != null) {
+        if (brief && panel == PlayerPanel.None && !detail && channel != null) {
             Column(
                 Modifier
                     .align(Alignment.TopStart)
@@ -329,7 +329,7 @@ fun PlayerScreen(
 
         // Ошибка / перепарсинг
         val err = error
-        if (panel == Panel.None && (err != null || reloading)) {
+        if (panel == PlayerPanel.None && (err != null || reloading)) {
             Column(
                 Modifier
                     .align(Alignment.Center)
@@ -348,7 +348,7 @@ fun PlayerScreen(
         }
 
         // Карточка «сейчас / далее» (OK)
-        if (detail && panel == Panel.None && channel != null) {
+        if (detail && panel == PlayerPanel.None && channel != null) {
             Column(
                 Modifier
                     .align(Alignment.BottomCenter)
@@ -391,9 +391,9 @@ fun PlayerScreen(
         }
 
         // Список каналов / категории (←, ← ещё раз)
-        if (panel == Panel.Channels || panel == Panel.Groups) {
+        if (panel == PlayerPanel.Channels || panel == PlayerPanel.Groups) {
             ChannelPanel(
-                showGroups = panel == Panel.Groups,
+                showGroups = panel == PlayerPanel.Groups,
                 panelGroup = panelGroup,
                 onGroupChange = { panelGroup = it },
                 allChannels = channels,
@@ -404,17 +404,17 @@ fun PlayerScreen(
                 onPick = { ch ->
                     playGroup = panelGroup
                     slug = ch.slug
-                    panel = Panel.None
+                    panel = PlayerPanel.None
                 },
                 onToggleFavorite = onToggleFavorite,
-                onShowGroups = { panel = Panel.Groups },
+                onShowGroups = { panel = PlayerPanel.Groups },
                 onActivity = { touch++ },
                 modifier = Modifier.align(Alignment.CenterStart),
             )
         }
 
         // Выбор потока (→)
-        if (panel == Panel.Streams) {
+        if (panel == PlayerPanel.Streams) {
             val selectedFocus = remember { FocusRequester() }
             LaunchedEffect(Unit) {
                 try {
@@ -455,7 +455,7 @@ fun PlayerScreen(
                                 chosen[slug] = i
                                 failedStreams.remove(slug)
                                 retried = retried - slug
-                                panel = Panel.None
+                                panel = PlayerPanel.None
                             },
                         ) { focused ->
                             val mark = if (i == streamIdx) "• " else ""
@@ -473,7 +473,7 @@ fun PlayerScreen(
                     FocusItem(
                         focusRequester = if (streams.isEmpty()) selectedFocus else null,
                         onClick = {
-                            panel = Panel.None
+                            panel = PlayerPanel.None
                             reload(slug, resetStream = false)
                         },
                     ) { focused ->
