@@ -19,43 +19,56 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private class PlaySession(val slugs: List<String>, val start: String)
+private class PlaySession(val group: Int, val start: String)
 
 @Composable
 private fun App(vm: MainViewModel = viewModel()) {
     val channels by vm.channels.collectAsState()
-    val favorites by vm.favorites.collectAsState()
     val status by vm.status.collectAsState()
+    val failures by vm.failures.collectAsState()
+    val favorites by vm.favorites.collectAsState()
+    val epg by vm.epg.collectAsState()
+    val epgStatus by vm.epgStatus.collectAsState()
 
-    var groupIndex by rememberSaveable { mutableStateOf(0) }
+    // Есть избранное — открываемся на нём, иначе на «Все каналы».
+    var groupIndex by rememberSaveable {
+        mutableStateOf(if (favorites.isNotEmpty()) Groups.FAVORITES else Groups.ALL)
+    }
     var lastPlayed by remember { mutableStateOf<String?>(null) }
     var session by remember { mutableStateOf<PlaySession?>(null) }
-    val bySlug = remember(channels) { channels.associateBy { it.slug } }
 
     val s = session
     if (s == null) {
         ChannelListScreen(
             channels = channels,
             favorites = favorites,
+            epg = epg,
+            epgStatus = epgStatus,
             status = status,
+            failures = failures,
             groupIndex = groupIndex,
             onGroupChange = { groupIndex = it },
             lastPlayed = lastPlayed,
-            onPlay = { slug, playlist ->
+            onPlay = { slug, group ->
                 lastPlayed = slug
-                session = PlaySession(playlist, slug)
+                session = PlaySession(group, slug)
             },
             onToggleFavorite = { vm.toggleFavorite(it) },
             onRefresh = { vm.refresh() },
         )
     } else {
         PlayerScreen(
-            slugs = s.slugs,
-            startSlug = s.start,
-            channels = bySlug,
+            channels = channels,
             favorites = favorites,
+            epg = epg,
+            startGroup = s.group,
+            startSlug = s.start,
             reloadChannel = { vm.reloadChannel(it) },
-            onCurrentChannel = { lastPlayed = it },
+            onToggleFavorite = { vm.toggleFavorite(it) },
+            onCurrent = { slug, group ->
+                lastPlayed = slug
+                groupIndex = group     // вернёмся в список на той же группе, откуда смотрели
+            },
             onExit = { session = null },
         )
     }

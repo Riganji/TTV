@@ -22,10 +22,13 @@ import java.io.IOException
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 
-/** Порт сетевой части parser.py: страница канала -> iframe-плееры -> ссылки на потоки. */
+/** Порт сетевой части parser.py: страница канала -> iframe-плееры -> ссылки на потоки (+ логотип). */
 class TelikScraper {
 
     class HttpError(val url: String, val status: Int) : IOException("$url: HTTP $status")
+
+    /** Страница загрузилась, но нужного на ней нет (нет плеера / нет ссылок). */
+    class ScrapeException(message: String) : Exception(message)
 
     private val client: OkHttpClient = OkHttpClient.Builder()
         .cookieJar(MemoryCookieJar())
@@ -41,11 +44,25 @@ class TelikScraper {
         }
         .build()
 
+    /** Человекочитаемая причина сбоя — для сообщения «какие каналы не загрузились». */
+    fun describe(e: Throwable): String = when (e) {
+        is HttpError -> when (e.status) {
+            404 -> "страница не найдена (HTTP 404)"
+            403 -> "доступ запрещён (HTTP 403)"
+            429 -> "слишком много запросов (HTTP 429)"
+            in 500..599 -> "ошибка сервера (HTTP ${e.status})"
+            else -> "HTTP ${e.status}"
+        }
+        is ScrapeException -> e.message ?: "ошибка разбора"
+        is IOException -> "нет ответа (${e.message ?: e.javaClass.simpleName})"
+        else -> e.message ?: e.javaClass.simpleName
+    }
+
     // ------------------------------------------------------------------ HTTP
 
     private suspend fun fetchOnce(url: String, referer: String?, iframe: Boolean): String =
         runInterruptible(Dispatchers.IO) {
-            val httpUrl = url.toHttpUrlOrNull() ?: throw IOException("bad url: $url")
+            val httpUrl = url.toHttpUrlOrNull() ?: throw IOException("некорректный адрес: $url")
             val rb = Request.Builder().url(httpUrl)
             if (referer != null) rb.header("Referer", referer)
             if (iframe) {
@@ -76,7 +93,7 @@ class TelikScraper {
                 last = e
             } catch (e: IOException) {
                 currentCoroutineContext().ensureActive()
-                last = IOException("$url: ${e.message}", e)
+                last = IOException("${e.message}", e)
             }
             delay(1500L * (attempt + 1))
         }
@@ -122,18 +139,19 @@ class TelikScraper {
         val url = Extract.urlJoin(Config.BASE, "$slug.html")
         val html = get(url)
         val title = Extract.channelTitle(html, slug)
-        val logo = Extract.channelLogo(html, url)
-        val programs = Extract.extractPrograms(html)
         val players = Extract.findPlayers(html, url)
         val labels = Extract.findTabLabels(html)
+        if (players.isEmpty()) throw ScrapeException("на странице не найден плеер")
 
         val streams = LinkedHashMap<String, StreamItem>()
+        val playerErrors = ArrayList<String>()
         players.forEachIndexed { i, player ->
             val base = if (labels.size == players.size) labels[i] else "Поток ${i + 1}"
             val urls = try {
                 resolvePlayer(player, url)
             } catch (e: IOException) {
                 Log.w(TAG, "$slug: плеер $player: ${e.message}")
+                playerErrors.add(describe(e))
                 return@forEachIndexed
             }
             urls.forEachIndexed { j, s ->
@@ -143,37 +161,50 @@ class TelikScraper {
                 }
             }
         }
+        if (streams.isEmpty()) {
+            throw ScrapeException(
+                if (playerErrors.isNotEmpty()) {
+                    "плееры не открылись: ${playerErrors.distinct().joinToString("; ")}"
+                } else {
+                    "плеер найден, но ссылок на поток в нём нет"
+                },
+            )
+        }
         Channel(
             slug = slug,
             title = title,
             page = url,
             streams = streams.values.toList(),
-            logo = logo,
-            programs = programs,
+            logo = Extract.findLogo(html, url, slug, title),
         )
     }
 
-    /** Параллельно (4 потока, пауза 0.3 c — как в main() у parser.py). onResult(null) = канал не разобрался. */
+    /**
+     * Параллельно (4 потока, пауза 0.3 c — как в main() у parser.py).
+     * Для каждого канала вызывается onResult: либо channel != null, либо error с причиной.
+     */
     suspend fun scrapeAll(
         slugs: List<String>,
         parallelism: Int = 4,
-        onResult: (slug: String, channel: Channel?) -> Unit,
+        onResult: (slug: String, channel: Channel?, error: String?) -> Unit,
     ) = coroutineScope {
         val gate = Semaphore(parallelism)
         for (slug in slugs) {
             launch {
-                val ch = gate.withPermit {
+                var channel: Channel? = null
+                var error: String? = null
+                gate.withPermit {
                     delay(300)
                     try {
-                        parseChannel(slug)
+                        channel = parseChannel(slug)
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
                         Log.w(TAG, "$slug: ${e.message}")
-                        null
+                        error = describe(e)
                     }
                 }
-                onResult(slug, ch)
+                onResult(slug, channel, error)
             }
         }
     }

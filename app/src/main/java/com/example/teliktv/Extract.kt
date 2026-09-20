@@ -100,7 +100,7 @@ object Extract {
             s
         }
 
-    // ---------------------------------------------------------------- потоки
+    // ---------------------------------------------------------------- парсинг
 
     fun extractStreams(text: String, baseUrl: String): List<String> {
         val t = normalizeText(text)
@@ -168,96 +168,6 @@ object Extract {
         return t.trim('«', '»', ' ').ifEmpty { fallback }
     }
 
-    // ---------------------------------------------------------------- логотип
-
-    private val OG_IMAGE_RE = Regex(
-        """<meta[^>]*\bproperty\s*=\s*["']og:image["'][^>]*\bcontent\s*=\s*["']([^"']+)["']""",
-        RegexOption.IGNORE_CASE,
-    )
-    private val OG_IMAGE_RE2 = Regex(
-        """<meta[^>]*\bcontent\s*=\s*["']([^"']+)["'][^>]*\bproperty\s*=\s*["']og:image["']""",
-        RegexOption.IGNORE_CASE,
-    )
-    private val LOGO_IMG_RE = Regex(
-        """<img[^>]*\bclass\s*=\s*["'][^"']*\blogo\b[^"']*["'][^>]*\bsrc\s*=\s*["']([^"']+)["']""",
-        RegexOption.IGNORE_CASE,
-    )
-    private val LOGO_IMG_RE2 = Regex(
-        """<img[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*\bclass\s*=\s*["'][^"']*\blogo\b[^"']*["']""",
-        RegexOption.IGNORE_CASE,
-    )
-
-    fun channelLogo(html: String, baseUrl: String): String? {
-        val h = normalizeText(html)
-        for (re in listOf(OG_IMAGE_RE, OG_IMAGE_RE2, LOGO_IMG_RE, LOGO_IMG_RE2)) {
-            val m = re.find(h) ?: continue
-            val v = m.groupValues[1].trim()
-            if (v.isEmpty()) continue
-            val u = urlJoin(baseUrl, v)
-            if (u.startsWith("http")) return u
-        }
-        return null
-    }
-
-    // ---------------------------------------------------------------- EPG со страницы канала
-
-    /** Контейнеры, в которых обычно лежит сетка вещания. */
-    private val PROGRAM_CONTAINER_RE = Regex(
-        """<(?:div|section|ul|ol|table)\b[^>]*\bclass\s*=\s*["'][^"']*""" +
-            """(?:epg|program|schedule|raspisanie|tv-?program|broadcast|efir|tv-?guide)""" +
-            """[^"']*["'][^>]*>(.*?)</(?:div|section|ul|ol|table)>""",
-        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
-    )
-
-    /** "12:00 Название", "12:00 - Название", "12:00: Название", "12:00 — Название". */
-    private val TIME_TITLE_RE = Regex(
-        """(?<![\d:])(\d{1,2}):(\d{2})(?!\d)\s*[-–—:]?\s*([A-Za-zА-Яа-яЁё«"'][^<>\n\r]{1,160})""",
-        RegexOption.MULTILINE,
-    )
-
-    /**
-     * Пытается вытащить программу передач со страницы канала.
-     * Сначала ищем тематические контейнеры (class~epg/program/schedule/…);
-     * если там меньше 3 строк — сканируем всю страницу. Возвращает список, отсортированный по времени.
-     */
-    fun extractPrograms(html: String): List<Program> {
-        val h = normalizeText(html)
-
-        val fromContainers = LinkedHashMap<String, Program>()
-        PROGRAM_CONTAINER_RE.findAll(h).forEach { m ->
-            collectPrograms(m.groupValues[1], fromContainers)
-        }
-        if (fromContainers.size >= 3) return fromContainers.values.sortedBy { it.time }
-
-        val fromPage = LinkedHashMap<String, Program>()
-        collectPrograms(h, fromPage)
-        return fromPage.values.sortedBy { it.time }
-    }
-
-    private fun collectPrograms(chunk: String, out: MutableMap<String, Program>) {
-        TIME_TITLE_RE.findAll(chunk).forEach { m ->
-            val hh = m.groupValues[1].toIntOrNull() ?: return@forEach
-            val mm = m.groupValues[2].toIntOrNull() ?: return@forEach
-            if (hh !in 0..23 || mm !in 0..59) return@forEach
-
-            var title = m.groupValues[3]
-                .replace(TAG_RE, " ")
-                .replace(WS_RE, " ")
-                .trim()
-                .trim('-', '–', '—', ':', '.', ',', '"', '\'', '«', '»', ' ')
-
-            if (title.length < 3) return@forEach
-            val low = title.lowercase()
-            if (low == "прямой эфир" || low == "смотреть онлайн" || low == "онлайн") return@forEach
-            if (title.length > 140) title = title.take(140).trim()
-
-            val time = "%02d:%02d".format(hh, mm)
-            out.putIfAbsent(time, Program(time = time, title = title))
-        }
-    }
-
-    // ---------------------------------------------------------------- кодировка
-
     /** Кодировка: из заголовка → из <meta> → UTF-8 (requests в parser.py делал похожий fallback). */
     fun decodeBody(bytes: ByteArray, contentType: String?): String {
         val head = String(bytes, 0, minOf(bytes.size, 4096), Charsets.ISO_8859_1)
@@ -272,4 +182,80 @@ object Extract {
         }
         return String(bytes, cs)
     }
+
+    // ---------------------------------------------------------------- логотипы
+
+    private val ATTR_RE = Regex("([\\w:-]+)\\s*=\\s*([\"'])(.*?)\\2", RegexOption.DOT_MATCHES_ALL)
+    private val META_TAG_RE = Regex("""<meta\b[^>]*>""", RegexOption.IGNORE_CASE)
+    private val IMG_TAG_RE = Regex("""<img\b[^>]*>""", RegexOption.IGNORE_CASE)
+    private val LINK_TAG_RE = Regex("""<link\b[^>]*>""", RegexOption.IGNORE_CASE)
+
+    /** Ключ для сравнения названий: буквы и цифры в нижнем регистре, ё -> е. */
+    fun norm(s: String): String = s.lowercase().replace('ё', 'е').filter { it.isLetterOrDigit() }
+
+    /** Атрибуты одного тега; имена в нижнем регистре. */
+    fun attributes(tag: String): Map<String, String> {
+        val out = HashMap<String, String>()
+        ATTR_RE.findAll(tag).forEach { out.putIfAbsent(it.groupValues[1].lowercase(), it.groupValues[3]) }
+        return out
+    }
+
+    /**
+     * Ищет логотип канала на странице. Порядок доверия:
+     * 1) картинка, в адресе которой есть slug канала; 2) картинка, у которой alt/title содержит название;
+     * 3) og:image; 4) картинка со словом «logo» в адресе/классе/alt; 5) link rel=image_src.
+     * SVG, favicon и data: пропускаются (Coil не рисует SVG без доп. модуля).
+     */
+    fun findLogo(html: String, pageUrl: String, slug: String, title: String): String? {
+        val h = normalizeText(html)
+        val titleKey = norm(title)
+        val slugKey = slug.lowercase()
+        val imgs = IMG_TAG_RE.findAll(h).map { attributes(it.value) }.toList()
+
+        fun usable(raw: String?): String? {
+            val r = raw?.trim() ?: return null
+            if (r.isEmpty() || r.startsWith("data:")) return null
+            val u = urlJoin(pageUrl, if (r.startsWith("//")) "https:$r" else r)
+            val low = u.lowercase()
+            if (!low.startsWith("http") || isIgnored(u)) return null
+            if (low.contains("favicon") || low.substringBefore('?').endsWith(".svg")) return null
+            return u
+        }
+
+        fun srcOf(a: Map<String, String>): String? {
+            val src = a["src"]?.trim()
+            if (!src.isNullOrEmpty() && !src.startsWith("data:")) return src
+            return a["data-src"] ?: a["data-lazy-src"] ?: a["data-original"]
+        }
+
+        for (a in imgs) {
+            val u = usable(srcOf(a)) ?: continue
+            if (u.lowercase().contains(slugKey)) return u
+        }
+        if (titleKey.isNotEmpty()) {
+            for (a in imgs) {
+                val u = usable(srcOf(a)) ?: continue
+                if (norm((a["alt"] ?: "") + " " + (a["title"] ?: "")).contains(titleKey)) return u
+            }
+        }
+        for (m in META_TAG_RE.findAll(h)) {
+            val a = attributes(m.value)
+            val prop = (a["property"] ?: a["name"])?.lowercase()
+            if (prop == "og:image" || prop == "twitter:image") usable(a["content"])?.let { return it }
+        }
+        for (a in imgs) {
+            val u = usable(srcOf(a)) ?: continue
+            val hinted = listOf(a["class"], a["id"], a["alt"], u).any { it?.contains("logo", ignoreCase = true) == true }
+            if (hinted) return u
+        }
+        for (m in LINK_TAG_RE.findAll(h)) {
+            val a = attributes(m.value)
+            if (a["rel"]?.lowercase() == "image_src") usable(a["href"])?.let { return it }
+        }
+        return null
+    }
+
+    /** Адреса, которые встречаются у threshold+ каналов сразу, — это общий баннер сайта, а не логотип. */
+    fun sharedLogoUrls(logos: Collection<String?>, threshold: Int = 3): Set<String> =
+        logos.filterNotNull().groupingBy { it }.eachCount().filterValues { it >= threshold }.keys
 }

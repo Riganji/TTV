@@ -114,43 +114,43 @@ class ExtractTest {
         assertEquals(Config.ALL_SLUGS.size, Config.ALL_SLUGS.toSet().size)
     }
 
+    private val page = "https://telik.live/kino-tv.html"
+
     @Test
-    fun programsFromContainer() {
-        val html = """
-            <html><body>
-            <div class="tv-program">
-              <div>06:00 Утро</div>
-              <div>09:00 - Новости</div>
-              <div>12:30: Кино</div>
-              <div>18:00 — Вечернее шоу</div>
-            </div>
-            </body></html>
-        """.trimIndent()
-        val programs = Extract.extractPrograms(html)
-        assertEquals(listOf("06:00", "09:00", "12:30", "18:00"), programs.map { it.time })
-        assertEquals("Утро", programs[0].title)
-        assertEquals("Новости", programs[1].title)
-        assertEquals("Кино", programs[2].title)
-        assertEquals("Вечернее шоу", programs[3].title)
+    fun logoBySlugInPath() {
+        val html = """<img src="/ad.gif" alt="реклама"><img src="/img/kino-tv.png" alt="x">"""
+        assertEquals("https://telik.live/img/kino-tv.png", Extract.findLogo(html, page, "kino-tv", "Кино ТВ"))
     }
 
     @Test
-    fun programsFallbackWholePage() {
-        val html = "<html><body><p>06:00 Утро</p><p>07:00 Новости</p><p>08:00 Мультфильмы</p></body></html>"
-        val programs = Extract.extractPrograms(html)
-        assertEquals(3, programs.size)
+    fun logoByAltTitle() {
+        val html = """<img src="/ad.gif" alt="реклама"><img src="/a/b.jpg" alt="Смотреть Кино ТВ онлайн">"""
+        assertEquals("https://telik.live/a/b.jpg", Extract.findLogo(html, page, "zzz", "Кино ТВ"))
     }
 
     @Test
-    fun currentProgramAt() {
-        val list = listOf(
-            Program("06:00", "Утро"),
-            Program("09:00", "Новости"),
-            Program("12:00", "Кино"),
-        )
-        assertEquals("Утро", list.currentAt("05:30")?.title)  // до первой — берём первую
-        assertEquals("Утро", list.currentAt("06:30")?.title)
-        assertEquals("Новости", list.currentAt("11:59")?.title)
-        assertEquals("Кино", list.currentAt("23:00")?.title)
+    fun logoFromOgImageEitherAttributeOrder() {
+        val html = """<meta content="//cdn.example.com/p/pic.png" property="og:image">"""
+        assertEquals("https://cdn.example.com/p/pic.png", Extract.findLogo(html, page, "zzz", "Кино ТВ"))
+    }
+
+    @Test
+    fun logoLazyLoadedAndLogoHint() {
+        val lazy = """<img src="data:image/gif;base64,R0lGOD" data-src="/lazy/kino-tv.webp">"""
+        assertEquals("https://telik.live/lazy/kino-tv.webp", Extract.findLogo(lazy, page, "kino-tv", "Кино ТВ"))
+        val hint = """<img src="/static/site-logo.png" class="x">"""
+        assertEquals("https://telik.live/static/site-logo.png", Extract.findLogo(hint, page, "zzz", "Кино ТВ"))
+    }
+
+    @Test
+    fun logoSkipsSvgFaviconAndData() {
+        val html = """<img src="/logo.svg" class="logo"><img src="/favicon.png" class="logo"><img src="data:image/png;base64,AAAA" class="logo">"""
+        assertEquals(null, Extract.findLogo(html, page, "zzz", "Кино ТВ"))
+    }
+
+    @Test
+    fun sharedLogosAreDetected() {
+        assertEquals(setOf("a"), Extract.sharedLogoUrls(listOf("a", "a", "a", "b", null, "b")))
+        assertEquals(emptySet<String>(), Extract.sharedLogoUrls(listOf("a", "b", null)))
     }
 }

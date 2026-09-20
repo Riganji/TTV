@@ -5,21 +5,18 @@ import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -34,7 +31,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
@@ -44,7 +40,6 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -61,103 +56,122 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.ui.PlayerView
-import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
-private enum class OverlayMode { None, Channels, Groups, Streams }
+private enum class Panel { None, Channels, Groups, Streams }
 
 /**
- * Пульт:
- *  Без оверлея:  ↑ ↓ — канал, ← — список каналов, → — потоки, OK/Menu — потоки
- *  Каналы:       ↑ ↓ — навигация, OK — открыть, ← — категории, → — потоки
- *  Категории:    ↑ ↓ — навигация, OK — выбрать и вернуться к каналам, → — каналы
- *  Потоки:       ↑ ↓ / ← → — навигация, OK — выбрать, Back — закрыть
- *  Back:         закрыть оверлей / выйти из плеера
+ * Управление пультом (панели закрыты):
+ *  ↑ / ↓ (и CH+/CH−)  — предыдущий / следующий канал в текущей группе
+ *  ←                  — список каналов (ещё раз ← — категории, включая «Избранное»)
+ *  → / Menu           — выбор потока
+ *  OK                 — карточка «сейчас / далее» из телепрограммы
+ *  Назад              — закрыть панель / выйти в список
+ * Если поток не открылся или не стартует за Config.STREAM_TIMEOUT_MS — автоматически включается
+ * следующий поток канала; когда исчерпаны все — один раз перепарсивается канал и всё повторяется.
  */
 @OptIn(UnstableApi::class)
 @Composable
 fun PlayerScreen(
-    slugs: List<String>,
-    startSlug: String,
-    channels: Map<String, Channel>,
+    channels: List<Channel>,
     favorites: Set<String>,
+    epg: EpgData,
+    startGroup: Int,
+    startSlug: String,
     reloadChannel: suspend (String) -> Unit,
-    onCurrentChannel: (String) -> Unit,
+    onToggleFavorite: (String) -> Unit,
+    onCurrent: (slug: String, group: Int) -> Unit,
     onExit: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val now = rememberNow()
 
-    var playlist by remember { mutableStateOf(slugs) }
-    var index by remember { mutableIntStateOf(playlist.indexOf(startSlug).coerceAtLeast(0)) }
-    val slug = playlist.getOrNull(index) ?: startSlug
-    val channel = channels[slug]
+    val bySlug = remember(channels) { channels.associateBy { it.slug } }
+    val bySlugState by rememberUpdatedState(bySlug)
+
+    var playGroup by remember { mutableIntStateOf(startGroup) }
+    var slug by remember { mutableStateOf(startSlug) }
+    val playlist = remember(playGroup, channels, favorites) {
+        Groups.channelsFor(playGroup, channels, favorites).map { it.slug }
+    }
+    val currentSlug by rememberUpdatedState(slug)
+    val position = playlist.indexOf(slug)
+    val num = if (position >= 0) "${position + 1}. " else ""
+    val channel = bySlug[slug]
     val streams = channel?.streams.orEmpty()
 
+    // Выбранный поток и «не открывшиеся» потоки помним отдельно для каждого канала.
     val chosen = remember { mutableStateMapOf<String, Int>() }
+    val failedStreams = remember { mutableStateMapOf<String, Set<Int>>() }
     val streamIdx = (chosen[slug] ?: 0).coerceIn(0, (streams.size - 1).coerceAtLeast(0))
     val stream = streams.getOrNull(streamIdx)
+    val logo = channel?.logo ?: epg.icons[slug]
+    val programmes = epg.bySlug[slug]
+    val nowProg = Epg.current(programmes, now)
 
-    var overlay by remember { mutableStateOf(OverlayMode.None) }
-    var info by remember { mutableStateOf(true) }
+    var panel by remember { mutableStateOf(Panel.None) }
+    var panelGroup by remember { mutableIntStateOf(startGroup) }
+    var touch by remember { mutableIntStateOf(0) }
+    var brief by remember { mutableStateOf(true) }
+    var detail by remember { mutableStateOf(false) }
+    var notice by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var reloading by remember { mutableStateOf(false) }
     var nonce by remember { mutableIntStateOf(0) }
     var retried by remember { mutableStateOf(emptySet<String>()) }
 
-    val currentSlug by rememberUpdatedState(slug)
-    val channelsState by rememberUpdatedState(channels)
-
-    var channelCursor by remember { mutableIntStateOf(index) }
-    var groupCursor by remember { mutableIntStateOf(0) }
-    var streamCursor by remember { mutableIntStateOf(streamIdx) }
-
-    val groupLists: List<Pair<String, List<String>>> = remember(channels, favorites) {
-        buildList {
-            add("Все каналы" to Config.ALL_SLUGS.filter { it in channels })
-            add("★ Избранное" to favorites.filter { it in channels })
-            Config.GROUPS.forEach { (name, sl) -> add(name to sl.filter { it in channels }) }
-        }
-    }
-
-    LaunchedEffect(overlay) {
-        when (overlay) {
-            OverlayMode.Channels -> channelCursor = index.coerceIn(0, (playlist.size - 1).coerceAtLeast(0))
-            OverlayMode.Streams -> streamCursor = streamIdx
-            OverlayMode.Groups -> {
-                val i = groupLists.indexOfFirst { it.second.contains(slug) }
-                if (i >= 0) groupCursor = i
-            }
-            OverlayMode.None -> {}
-        }
-    }
+    // ---- действия
 
     fun zap(delta: Int) {
         if (playlist.isEmpty()) return
-        index = (index + delta).mod(playlist.size)
-        overlay = OverlayMode.None
+        val i = playlist.indexOf(slug)
+        val n = if (i < 0) (if (delta > 0) 0 else playlist.size - 1) else (i + delta).mod(playlist.size)
+        slug = playlist[n]
+        detail = false
     }
 
-    fun switchPlaylist(newList: List<String>, startAt: String? = null) {
-        if (newList.isEmpty()) return
-        val target = startAt?.takeIf { it in newList } ?: newList.first()
-        playlist = newList
-        index = newList.indexOf(target)
-    }
-
-    fun reload(s: String) {
+    /** Перепарсить канал; resetStream — вернуться на первый поток (когда перебрали все). */
+    fun reload(s: String, resetStream: Boolean) {
         scope.launch {
             reloading = true
-            try { reloadChannel(s) } finally { reloading = false }
+            try {
+                reloadChannel(s)
+            } finally {
+                reloading = false
+            }
+            if (resetStream) {
+                chosen[s] = 0
+                failedStreams.remove(s)
+            }
             nonce++
         }
     }
 
-    // ---- ExoPlayer
+    /** Поток не открылся / завис: следующий поток канала -> перепарсинг канала -> ошибка. */
+    fun onStreamFailed(reason: String) {
+        val s = currentSlug
+        val list = bySlugState[s]?.streams.orEmpty()
+        val cur = (chosen[s] ?: 0).coerceIn(0, (list.size - 1).coerceAtLeast(0))
+        val failed = (failedStreams[s] ?: emptySet()) + cur
+        failedStreams[s] = failed
+        val next = (1..list.size).map { (cur + it) % list.size }.firstOrNull { it !in failed }
+        when {
+            next != null -> {
+                chosen[s] = next
+                notice = "«${list[cur].label}» не открылся ($reason) — включаю «${list[next].label}»"
+            }
+            s !in retried -> {
+                retried = retried + s
+                notice = "Ни один поток не открылся — обновляю ссылки канала…"
+                reload(s, resetStream = true)
+            }
+            else -> error = "Ни один поток канала не открылся ($reason)"
+        }
+    }
+
+    // ---- плеер
     val exo = remember { ExoPlayer.Builder(context).build().apply { playWhenReady = true } }
     DisposableEffect(Unit) { onDispose { exo.release() } }
 
@@ -166,28 +180,13 @@ fun PlayerScreen(
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_READY) {
                     error = null
+                    failedStreams.remove(currentSlug)
                     retried = retried - currentSlug
                 }
             }
 
             override fun onPlayerError(e: PlaybackException) {
-                val s = currentSlug
-                val ch = channelsState[s]
-                if (ch != null && ch.streams.size > 1) {
-                    val cur = (chosen[s] ?: 0).coerceIn(0, ch.streams.size - 1)
-                    if (cur + 1 < ch.streams.size) {
-                        chosen[s] = cur + 1
-                        error = "Поток не открылся. Пробую следующий (${cur + 2} из ${ch.streams.size})…"
-                        return
-                    }
-                }
-                if (s !in retried) {
-                    retried = retried + s
-                    error = "Обновляю ссылки канала…"
-                    reload(s)
-                    return
-                }
-                error = "Поток не открылся (${e.errorCodeName})"
+                onStreamFailed(e.errorCodeName)
             }
         }
         exo.addListener(listener)
@@ -196,31 +195,64 @@ fun PlayerScreen(
 
     LaunchedEffect(slug, stream?.url, nonce) {
         error = null
-        if (stream != null) {
-            exo.setMediaSource(buildSource(context, stream))
-            exo.prepare()
-            exo.playWhenReady = true
-        } else {
+        if (stream == null) {
             exo.stop()
+            return@LaunchedEffect
+        }
+        exo.setMediaSource(buildSource(context, stream))
+        exo.prepare()
+        exo.playWhenReady = true
+        // «Висящий» поток без ошибки тоже считаем нерабочим.
+        delay(Config.STREAM_TIMEOUT_MS)
+        if (exo.playbackState != Player.STATE_READY) {
+            onStreamFailed("нет ответа за ${Config.STREAM_TIMEOUT_MS / 1000} с")
         }
     }
 
-    LaunchedEffect(slug) { onCurrentChannel(slug) }
+    LaunchedEffect(slug, playGroup) { onCurrent(slug, playGroup) }
     LaunchedEffect(slug, streamIdx) {
-        info = true
+        brief = true
         delay(3500)
-        info = false
+        brief = false
     }
-
-    val rootFocus = remember { FocusRequester() }
-    LaunchedEffect(overlay) {
-        if (overlay == OverlayMode.None) {
-            try { rootFocus.requestFocus() } catch (_: Exception) {}
+    LaunchedEffect(notice) {
+        if (notice != null) {
+            delay(5000)
+            notice = null
+        }
+    }
+    LaunchedEffect(detail) {
+        if (detail) {
+            delay(8000)
+            detail = false
+        }
+    }
+    LaunchedEffect(panel, touch) {
+        when (panel) {
+            Panel.Streams -> { delay(7000); panel = Panel.None }
+            Panel.Channels, Panel.Groups -> { delay(20000); panel = Panel.None }
+            Panel.None -> {}
         }
     }
 
+    // ---- фокус и клавиши
+    val rootFocus = remember { FocusRequester() }
+    LaunchedEffect(panel) {
+        if (panel == Panel.None) {
+            try {
+                rootFocus.requestFocus()
+            } catch (e: Exception) {
+                // корневой Box ещё не присоединён
+            }
+        }
+    }
     BackHandler {
-        if (overlay != OverlayMode.None) overlay = OverlayMode.None else onExit()
+        when {
+            panel == Panel.Groups -> panel = Panel.Channels
+            panel != Panel.None -> panel = Panel.None
+            detail -> detail = false
+            else -> onExit()
+        }
     }
 
     Box(
@@ -228,73 +260,19 @@ fun PlayerScreen(
             .fillMaxSize()
             .background(Color.Black)
             .onPreviewKeyEvent { ev ->
-                if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                when (overlay) {
-                    OverlayMode.None -> when (ev.key) {
-                        Key.DirectionUp, Key.ChannelUp, Key.PageUp -> { zap(-1); true }
-                        Key.DirectionDown, Key.ChannelDown, Key.PageDown -> { zap(1); true }
-                        Key.DirectionLeft -> { overlay = OverlayMode.Channels; true }
-                        Key.DirectionRight -> { overlay = OverlayMode.Streams; true }
-                        Key.DirectionCenter, Key.Enter, Key.NumPadEnter, Key.Menu -> {
-                            overlay = OverlayMode.Streams; true
-                        }
-                        else -> false
+                if (panel != Panel.None || ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (ev.key) {
+                    Key.DirectionUp, Key.ChannelUp, Key.PageUp -> { zap(-1); true }
+                    Key.DirectionDown, Key.ChannelDown, Key.PageDown -> { zap(1); true }
+                    Key.DirectionLeft -> {
+                        panelGroup = playGroup
+                        panel = Panel.Channels
+                        touch++
+                        true
                     }
-
-                    OverlayMode.Channels -> when (ev.key) {
-                        Key.DirectionUp -> { channelCursor = (channelCursor - 1).coerceAtLeast(0); true }
-                        Key.DirectionDown -> {
-                            channelCursor = (channelCursor + 1).coerceAtMost((playlist.size - 1).coerceAtLeast(0)); true
-                        }
-                        Key.DirectionLeft -> { overlay = OverlayMode.Groups; true }
-                        Key.DirectionRight -> { overlay = OverlayMode.Streams; true }
-                        Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
-                            if (channelCursor in playlist.indices) {
-                                index = channelCursor
-                                overlay = OverlayMode.None
-                            }
-                            true
-                        }
-                        else -> false
-                    }
-
-                    OverlayMode.Groups -> when (ev.key) {
-                        Key.DirectionUp -> { groupCursor = (groupCursor - 1).coerceAtLeast(0); true }
-                        Key.DirectionDown -> {
-                            groupCursor = (groupCursor + 1).coerceAtMost((groupLists.size - 1).coerceAtLeast(0)); true
-                        }
-                        Key.DirectionRight -> { overlay = OverlayMode.Channels; true }
-                        Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
-                            val list = groupLists.getOrNull(groupCursor)?.second.orEmpty()
-                            if (list.isNotEmpty()) {
-                                switchPlaylist(list)
-                                channelCursor = 0
-                                overlay = OverlayMode.Channels
-                            }
-                            true
-                        }
-                        else -> false
-                    }
-
-                    OverlayMode.Streams -> when (ev.key) {
-                        Key.DirectionUp, Key.DirectionLeft -> {
-                            streamCursor = (streamCursor - 1).coerceAtLeast(0); true
-                        }
-                        Key.DirectionDown, Key.DirectionRight -> {
-                            streamCursor = (streamCursor + 1).coerceAtMost(streams.size); true
-                        }
-                        Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
-                            if (streamCursor < streams.size) {
-                                chosen[slug] = streamCursor
-                                overlay = OverlayMode.None
-                            } else {
-                                overlay = OverlayMode.None
-                                reload(slug)
-                            }
-                            true
-                        }
-                        else -> false
-                    }
+                    Key.DirectionRight, Key.Menu -> { panel = Panel.Streams; touch++; true }
+                    Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> { detail = !detail; true }
+                    else -> false
                 }
             }
             .focusRequester(rootFocus)
@@ -314,12 +292,8 @@ fun PlayerScreen(
             },
         )
 
-        // ---- плашка «сейчас смотрим»
-        val nowTime = remember(slug) {
-            SimpleDateFormat("HH:mm", Locale.US).format(Date())
-        }
-        val program = remember(channel, nowTime) { channel?.programs?.currentAt(nowTime) }
-        if (info && overlay == OverlayMode.None && channel != null) {
+        // Короткая плашка после переключения
+        if (brief && panel == Panel.None && !detail && channel != null) {
             Column(
                 Modifier
                     .align(Alignment.TopStart)
@@ -327,21 +301,35 @@ fun PlayerScreen(
                     .background(Color(0xB3000000), RoundedCornerShape(12.dp))
                     .padding(horizontal = 20.dp, vertical = 14.dp),
             ) {
-                Txt("${index + 1}. ${channel.title}", size = 26.sp, weight = FontWeight.Bold)
-                if (program != null) {
-                    Spacer(Modifier.height(4.dp))
-                    Txt("${program.time}  ${program.title}", size = 18.sp, color = Amber)
-                }
+                Txt("$num${channel.title}", size = 26.sp, weight = FontWeight.Bold)
                 if (streams.size > 1 && stream != null) {
-                    Spacer(Modifier.height(2.dp))
-                    Txt("${stream.label}  (${streamIdx + 1} из ${streams.size})", size = 16.sp, color = TextDim)
+                    Txt("${stream.label}  (${streamIdx + 1} из ${streams.size})", size = 18.sp, color = TextDim)
+                }
+                if (nowProg != null) {
+                    Txt("${Epg.time(nowProg.start)}–${Epg.time(nowProg.stop)}  ${nowProg.title}", size = 18.sp, color = TextDim)
                 }
             }
         }
 
-        // ---- ошибка / перезагрузка
+        // Уведомление об автопереключении потока
+        val msg = notice
+        if (msg != null) {
+            Txt(
+                msg,
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 40.dp)
+                    .background(Color(0xCC000000), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+                size = 19.sp,
+                color = Amber,
+                maxLines = 2,
+            )
+        }
+
+        // Ошибка / перепарсинг
         val err = error
-        if (overlay == OverlayMode.None && (err != null || reloading)) {
+        if (panel == Panel.None && (err != null || reloading)) {
             Column(
                 Modifier
                     .align(Alignment.Center)
@@ -354,183 +342,148 @@ fun PlayerScreen(
                 } else if (err != null) {
                     Txt(err, size = 22.sp, color = ErrorRed)
                     Spacer(Modifier.height(6.dp))
-                    Txt("→ — выбрать другой поток", size = 18.sp, color = TextDim)
+                    Txt("→ выбрать поток вручную, ↑ ↓ другой канал", size = 18.sp, color = TextDim)
                 }
             }
         }
 
-        when (overlay) {
-            OverlayMode.Channels -> ChannelsOverlay(
-                playlist = playlist,
-                channels = channels,
+        // Карточка «сейчас / далее» (OK)
+        if (detail && panel == Panel.None && channel != null) {
+            Column(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xF2000000))))
+                    .padding(horizontal = 48.dp, vertical = 32.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ChannelLogo(logo, channel.title)
+                    Spacer(Modifier.width(16.dp))
+                    Txt("$num${channel.title}", size = 30.sp, weight = FontWeight.Bold)
+                }
+                Spacer(Modifier.height(14.dp))
+                if (nowProg == null) {
+                    Txt(
+                        if (programmes.isNullOrEmpty()) "Для этого канала нет телепрограммы" else "Сейчас данных нет",
+                        size = 20.sp,
+                        color = TextDim,
+                    )
+                } else {
+                    Txt(
+                        "${Epg.time(nowProg.start)}–${Epg.time(nowProg.stop)}   ${nowProg.title}",
+                        size = 24.sp,
+                        weight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    ProgressBar(Epg.progress(nowProg, now), Modifier.fillMaxWidth())
+                    nowProg.desc?.let {
+                        Spacer(Modifier.height(8.dp))
+                        Txt(it, size = 17.sp, color = TextDim, maxLines = 2)
+                    }
+                }
+                val next = Epg.upcoming(programmes, now, 3)
+                if (next.isNotEmpty()) {
+                    Spacer(Modifier.height(12.dp))
+                    Txt("Далее", size = 16.sp, color = Amber)
+                    for (p in next) Txt("${Epg.time(p.start)}   ${p.title}", size = 18.sp, color = TextMain)
+                }
+            }
+        }
+
+        // Список каналов / категории (←, ← ещё раз)
+        if (panel == Panel.Channels || panel == Panel.Groups) {
+            ChannelPanel(
+                showGroups = panel == Panel.Groups,
+                panelGroup = panelGroup,
+                onGroupChange = { panelGroup = it },
+                allChannels = channels,
                 favorites = favorites,
-                cursor = channelCursor,
-                onCursor = { channelCursor = it },
-                onPick = { i ->
-                    index = i
-                    overlay = OverlayMode.None
+                epg = epg,
+                now = now,
+                currentSlug = slug,
+                onPick = { ch ->
+                    playGroup = panelGroup
+                    slug = ch.slug
+                    panel = Panel.None
                 },
+                onToggleFavorite = onToggleFavorite,
+                onShowGroups = { panel = Panel.Groups },
+                onActivity = { touch++ },
+                modifier = Modifier.align(Alignment.CenterStart),
             )
-
-            OverlayMode.Groups -> GroupsOverlay(
-                groups = groupLists,
-                cursor = groupCursor,
-                onCursor = { groupCursor = it },
-                onPick = { i ->
-                    val list = groupLists.getOrNull(i)?.second.orEmpty()
-                    if (list.isNotEmpty()) {
-                        switchPlaylist(list)
-                        channelCursor = 0
-                        overlay = OverlayMode.Channels
-                    }
-                },
-            )
-
-            OverlayMode.Streams -> StreamsOverlay(
-                title = channel?.title ?: slug,
-                streams = streams,
-                cursor = streamCursor,
-                currentIdx = streamIdx,
-                onCursor = { streamCursor = it },
-                onPick = { i ->
-                    if (i < streams.size) chosen[slug] = i else reload(slug)
-                    overlay = OverlayMode.None
-                },
-            )
-
-            OverlayMode.None -> {}
         }
-    }
-}
 
-// ------------------------------------------------------------------ оверлеи
-
-@Composable
-private fun ChannelsOverlay(
-    playlist: List<String>,
-    channels: Map<String, Channel>,
-    favorites: Set<String>,
-    cursor: Int,
-    onCursor: (Int) -> Unit,
-    onPick: (Int) -> Unit,
-) {
-    val listState = rememberLazyListState()
-    LaunchedEffect(cursor) { listState.animateScrollToItem(cursor) }
-
-    Column(
-        Modifier
-            .fillMaxHeight()
-            .width(480.dp)
-            .background(Color(0xD9000000))
-            .padding(24.dp),
-    ) {
-        Txt("Каналы", size = 26.sp, weight = FontWeight.Bold)
-        Spacer(Modifier.height(12.dp))
-        LazyColumn(
-            state = listState,
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            itemsIndexed(playlist) { i, s ->
-                val ch = channels[s]
-                val title = ch?.title ?: s
-                FocusItem(
-                    modifier = Modifier.fillMaxWidth(),
-                    selected = i == cursor,
-                    onFocused = { onCursor(i) },
-                    onClick = { onPick(i) },
-                ) { focused ->
-                    if (ch?.logo != null) {
-                        AsyncImage(
-                            model = ch.logo,
-                            contentDescription = null,
-                            modifier = Modifier.size(28.dp).clip(RoundedCornerShape(4.dp)),
-                            contentScale = ContentScale.Fit,
-                        )
-                        Spacer(Modifier.width(10.dp))
-                    }
-                    if (s in favorites) {
-                        Txt("★", color = if (focused) OnAmber else Amber, size = 16.sp)
-                        Spacer(Modifier.width(6.dp))
-                    }
-                    Txt(title, Modifier.weight(1f), size = 20.sp, color = if (focused) OnAmber else TextMain)
+        // Выбор потока (→)
+        if (panel == Panel.Streams) {
+            val selectedFocus = remember { FocusRequester() }
+            LaunchedEffect(Unit) {
+                try {
+                    selectedFocus.requestFocus()
+                } catch (e: Exception) {
+                    // фокус останется на дефолтном элементе
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun GroupsOverlay(
-    groups: List<Pair<String, List<String>>>,
-    cursor: Int,
-    onCursor: (Int) -> Unit,
-    onPick: (Int) -> Unit,
-) {
-    Column(
-        Modifier
-            .fillMaxHeight()
-            .width(480.dp)
-            .background(Color(0xD9000000))
-            .padding(24.dp),
-    ) {
-        Txt("Категории", size = 26.sp, weight = FontWeight.Bold)
-        Spacer(Modifier.height(12.dp))
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            itemsIndexed(groups) { i, (name, list) ->
-                FocusItem(
-                    modifier = Modifier.fillMaxWidth(),
-                    selected = i == cursor,
-                    onFocused = { onCursor(i) },
-                    onClick = { onPick(i) },
-                ) { focused ->
-                    Txt(name, Modifier.weight(1f), color = if (focused) OnAmber else TextMain)
-                    Txt(list.size.toString(), color = if (focused) OnAmber else TextDim)
+            Column(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xF2000000))))
+                    .padding(horizontal = 48.dp, vertical = 32.dp)
+                    .onPreviewKeyEvent { ev ->
+                        if (ev.type == KeyEventType.KeyDown) touch++
+                        false
+                    },
+            ) {
+                Txt("$num${channel?.title ?: slug}", size = 30.sp, weight = FontWeight.Bold)
+                Spacer(Modifier.height(4.dp))
+                Txt(
+                    if (streams.size > 1) "Выберите поток" else "У канала один поток",
+                    size = 18.sp,
+                    color = TextDim,
+                )
+                Spacer(Modifier.height(14.dp))
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    val failedNow = failedStreams[slug].orEmpty()
+                    streams.forEachIndexed { i, s ->
+                        FocusItem(
+                            selected = i == streamIdx,
+                            focusRequester = if (i == streamIdx) selectedFocus else null,
+                            onClick = {
+                                chosen[slug] = i
+                                failedStreams.remove(slug)
+                                retried = retried - slug
+                                panel = Panel.None
+                            },
+                        ) { focused ->
+                            val mark = if (i == streamIdx) "• " else ""
+                            val bad = i in failedNow
+                            Txt(
+                                mark + s.label + if (bad) " — не открылся" else "",
+                                color = when {
+                                    focused -> OnAmber
+                                    bad -> ErrorRed
+                                    else -> TextMain
+                                },
+                            )
+                        }
+                    }
+                    FocusItem(
+                        focusRequester = if (streams.isEmpty()) selectedFocus else null,
+                        onClick = {
+                            panel = Panel.None
+                            reload(slug, resetStream = false)
+                        },
+                    ) { focused ->
+                        Txt("Обновить ссылки", color = if (focused) OnAmber else TextDim)
+                    }
                 }
+                Spacer(Modifier.height(14.dp))
+                Txt("← → выбор     OK — включить     Назад — закрыть", size = 16.sp, color = TextDim)
             }
         }
-    }
-}
-
-@Composable
-private fun StreamsOverlay(
-    title: String,
-    streams: List<StreamItem>,
-    cursor: Int,
-    currentIdx: Int,
-    onCursor: (Int) -> Unit,
-    onPick: (Int) -> Unit,
-) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xF2000000))))
-            .padding(horizontal = 48.dp, vertical = 32.dp),
-    ) {
-        Txt(title, size = 28.sp, weight = FontWeight.Bold)
-        Spacer(Modifier.height(4.dp))
-        Txt(if (streams.size > 1) "Выберите поток" else "У канала один поток", size = 18.sp, color = TextDim)
-        Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            streams.forEachIndexed { i, s ->
-                FocusItem(
-                    selected = i == currentIdx,
-                    onFocused = { onCursor(i) },
-                    onClick = { onPick(i) },
-                ) { focused ->
-                    val mark = if (i == currentIdx) "• " else ""
-                    Txt(mark + s.label, color = if (focused) OnAmber else TextMain)
-                }
-            }
-            FocusItem(
-                onFocused = { onCursor(streams.size) },
-                onClick = { onPick(streams.size) },
-            ) { focused ->
-                Txt("↻ Обновить ссылки", color = if (focused) OnAmber else TextDim)
-            }
-        }
-        Spacer(Modifier.height(14.dp))
-        Txt("↑ ↓ / ← → — поток     OK — выбрать     Назад — закрыть", size = 15.sp, color = TextDim)
     }
 }
 

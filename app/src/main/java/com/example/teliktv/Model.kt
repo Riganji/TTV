@@ -13,23 +13,36 @@ data class StreamItem(
     val referer: String get() = Extract.origin(player)
 }
 
-/** Строка программы в сетке вещания. time — "HH:MM" (локальное время страницы). */
-@Serializable
-data class Program(
-    val time: String,
-    val title: String,
-)
-
 @Serializable
 data class Channel(
     val slug: String,
     val title: String,
     val page: String,
     val streams: List<StreamItem>,
+    /** Логотип, найденный на странице канала (может быть null — тогда берётся иконка из EPG). */
     val logo: String? = null,
-    val programs: List<Program> = emptyList(),
 )
 
-/** Программа, идущая в момент now ("HH:MM"). Если расписание на сегодня — берём последнюю подходящую. */
-fun List<Program>.currentAt(now: String): Program? =
-    lastOrNull { it.time <= now } ?: firstOrNull()
+/** Передача из телепрограммы; время — миллисекунды Unix. */
+@Serializable
+data class Programme(
+    val start: Long,
+    val stop: Long,
+    val title: String,
+    val desc: String? = null,
+)
+
+/** Канал, который не удалось загрузить при обновлении. cached = в списке остался сохранённый вариант. */
+data class ChannelFailure(
+    val slug: String,
+    val name: String,
+    val reason: String,
+    val cached: Boolean,
+)
+
+data class EpgStatus(
+    val loading: Boolean = false,
+    val error: String? = null,
+    val matched: Int = 0,
+    val total: Int = 0,
+)
