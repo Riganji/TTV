@@ -20,7 +20,7 @@ object Config {
         "Кино" to listOf(
             "kino-tv", "hit-hd", "kinopokaz", "kinosat", "komedijnoe", "fantastica-hd",
             "lyubimoe-kino", "tv-xxi", "hollywood", "strah-hd", "ostrosyuzhetnoe-hd",
-            "sony-sci-fi", "illyuzion", "strashnoe-hd", "shokiruyushchee", "scream", "dom-kino-premium", "sony-turbo",
+            "sony-sci-fi", "illyuzion", "strashnoe-hd", "shokiruyushchee", "devil-tv",
         ),
         "Fresh" to listOf(
             "fresh-premiere", "fresh-adventure", "fresh-cinema", "fresh-comedy",
@@ -32,10 +32,9 @@ object Config {
         ),
         "Познавательные" to listOf(
             "history-channel", "history-2", "national-geographic", "discovery-channel",
-            "viasat-history", "nat-geo-wild", "id-investigation-discovery", "muzhskoj", "avto24",
+            "viasat-history", "nat-geo-wild", "id-investigation-discovery",
         ),
-        "Общие" to listOf(
-            "pervyj-kanal", "rossiya-1", "ntv", "ren-tv", "tv-tsentr", "pyatyj-kanal", "rbk-tv", "rossiya-24", "izvestiya", "tass"),
+        "Другое" to listOf("muzhskoj", "avto24"),
     )
 
     val ALL_SLUGS: List<String> = GROUPS.flatMap { it.second }
