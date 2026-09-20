@@ -32,8 +32,7 @@ object Config {
         ),
         "Познавательные" to listOf(
             "history-channel", "history-2", "national-geographic", "discovery-channel",
-            "viasat-history", "nat-geo-wild", "id-investigation-discovery",
-			"muzhskoj", "avto24",
+            "viasat-history", "nat-geo-wild", "id-investigation-discovery", "muzhskoj", "avto24",
         ),
         "Другое" to listOf("pervyj-kanal", "rossiya-1", "ntv", "ren-tv", "tv-tsentr", "pyatyj-kanal", "rbk-tv", "rossiya-24", "izvestiya", "tass"),
     )
