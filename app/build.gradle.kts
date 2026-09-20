@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -24,7 +26,7 @@ android {
      */
     signingConfigs {
         create("app") {
-            val props = java.util.Properties().apply {
+            val props = Properties().apply {
                 val f = rootProject.file("keystore.properties")
                 if (f.exists()) f.inputStream().use { load(it) }
             }
