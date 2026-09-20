@@ -109,9 +109,13 @@ class ExtractTest {
     }
 
     @Test
-    fun groupsCoverAllChannelsOnce() {
-        assertEquals(38, Config.ALL_SLUGS.size)
-        assertEquals(Config.ALL_SLUGS.size, Config.ALL_SLUGS.toSet().size)
+    fun configHasNoDuplicatesAndSlugsLookValid() {
+        // Не привязано к конкретному списку каналов — можно свободно править Config.GROUPS.
+        assertEquals(Config.GROUPS.sumOf { it.second.size }, Config.ALL_SLUGS.size)
+        val dups = Config.ALL_SLUGS.groupBy { it }.filterValues { it.size > 1 }.keys
+        assertEquals(emptySet<String>(), dups)
+        val bad = Config.ALL_SLUGS.filterNot { Regex("[a-z0-9-]+").matches(it) }
+        assertEquals(emptyList<String>(), bad)
     }
 
     private val page = "https://telik.live/kino-tv.html"
