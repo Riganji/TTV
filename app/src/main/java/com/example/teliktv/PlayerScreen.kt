@@ -312,21 +312,24 @@ fun PlayerScreen(
             timeshiftUi = true
             timelineFocused = false
             exo.playWhenReady = false
-            val off = exo.currentLiveOffset
-            val behind = if (off == C.TIME_UNSET || off < 0) {
-                exo.totalBufferedDuration.coerceAtLeast(0L)
-            } else {
-                off
-            }
+            val behind = realBehindMs()
             shiftLabel = formatShift(behind)
             val mb = (behind / 1000.0 * PlayerPrefs.MB_PER_SEC).coerceAtLeast(0.1)
             cacheUsedMb = "кэш: ${"%.1f".format(mb)} МБ"
         }
     }
 
+    /** Реальная глубина timeshift по данным плеера (без «настенных» часов). */
+    fun realBehindMs(): Long {
+        val liveOff = exo.currentLiveOffset
+        if (liveOff != C.TIME_UNSET && liveOff > 0L) return liveOff
+        return exo.totalBufferedDuration.coerceAtLeast(0L)
+    }
+
     /**
-     * Перемотка только внутри уже загруженного буфера.
-     * Seek за край буфера / live-окна на CDN даёт ERROR_CODE_IO_UNSPECIFIED.
+     * Перемотка в пределах live-окна / буфера плеера.
+     * Не ограничиваем только totalBufferedDuration (часто 2–3 с вперёд) —
+     * для live опираемся на currentLiveOffset (реальный отступ от эфира).
      */
     fun seekBy(deltaMs: Long) {
         if (!inTimeshift || error != null) return
@@ -335,19 +338,32 @@ fun PlayerScreen(
             return
         }
         val pos = exo.currentPosition
+        val behind = realBehindMs()
         val bufferedEnd = exo.bufferedPosition
-        val bufDur = exo.totalBufferedDuration.coerceAtLeast(0L)
-        // Левый край ≈ то, что ещё в RAM; правый — bufferedPosition (не дальше live).
-        val minPos = (pos - bufDur).coerceAtLeast(0L)
-        val maxPos = maxOf(pos, bufferedEnd)
+        // Назад: не дальше, чем текущий отступ от эфира (и не меньше 0).
+        // Вперёд: к эфиру (уменьшаем behind) или к bufferedEnd.
+        val minPos = (pos - behind).coerceAtLeast(0L)
+        val maxPos = when {
+            bufferedEnd > pos -> bufferedEnd
+            behind > 0L -> pos + behind  // запас к live edge
+            else -> pos
+        }
         val target = (pos + deltaMs).coerceIn(minPos, maxPos)
-        if (kotlin.math.abs(target - pos) < 500L) {
-            notice = if (deltaMs < 0) "начало буфера timeshift" else "край буфера timeshift"
+        if (kotlin.math.abs(target - pos) < 400L) {
+            notice = if (deltaMs < 0) "начало доступного timeshift" else "край / эфир"
             return
         }
         exo.seekTo(target)
+        // Обновим подпись после seek (liveOffset пересчитает плеер).
         val off = exo.currentLiveOffset
-        shiftLabel = formatShift(if (off == C.TIME_UNSET || off < 0) (maxPos - target) else off)
+        shiftLabel = formatShift(
+            when {
+                off != C.TIME_UNSET && off > 0L -> off
+                else -> (maxPos - target).coerceAtLeast(0L)
+            },
+        )
+        val mb = (realBehindMs() / 1000.0 * PlayerPrefs.MB_PER_SEC).coerceAtLeast(0.1)
+        cacheUsedMb = "кэш: ${"%.1f".format(mb)} МБ"
     }
 
 
@@ -516,19 +532,12 @@ fun PlayerScreen(
         }
     }
 
-    // Счётчик на всём timeshift (пауза или воспроизведение с буфера).
+    // Счётчик только от реальных данных плеера (не wall-clock).
     LaunchedEffect(inTimeshift) {
         if (!inTimeshift) return@LaunchedEffect
         while (true) {
-            val liveOff = exo.currentLiveOffset
-            val wallBehind = if (pauseStartedAt > 0L) System.currentTimeMillis() - pauseStartedAt else 0L
-            // liveOffset растёт, пока стоим; если поток не отдаёт offset — берём wall clock.
-            val behindMs = when {
-                liveOff != C.TIME_UNSET && liveOff > 0L -> maxOf(liveOff, wallBehind)
-                else -> maxOf(exo.totalBufferedDuration.coerceAtLeast(0L), wallBehind)
-            }
+            val behindMs = realBehindMs()
             shiftLabel = formatShift(behindMs)
-            // МБ всегда от отставания (≈0.5 МБ/с) — двигается вместе с таймером.
             val mb = (behindMs / 1000.0 * PlayerPrefs.MB_PER_SEC).coerceAtLeast(0.1)
             cacheUsedMb = "кэш: ${"%.1f".format(mb)} МБ"
             delay(400)
@@ -656,23 +665,57 @@ fun PlayerScreen(
                     }
                 }
                 when (ev.key) {
-                    Key.DirectionUp, Key.ChannelUp, Key.PageUp -> { zap(-1); true }
-                    Key.DirectionDown, Key.ChannelDown, Key.PageDown -> { zap(1); true }
+                    Key.DirectionUp, Key.ChannelUp, Key.PageUp -> {
+                        if (inTimeshift) {
+                            // В timeshift ↑ не меняет канал — открывает карточку плеера (таймлайн).
+                            detail = false
+                            timeshiftUi = true
+                            timelineFocused = true
+                            detailIgnoreOkUntil = System.currentTimeMillis() + 450
+                        } else {
+                            zap(-1)
+                        }
+                        true
+                    }
+                    Key.DirectionDown, Key.ChannelDown, Key.PageDown -> {
+                        if (inTimeshift) {
+                            detail = false
+                            timeshiftUi = true
+                            timelineFocused = false
+                            detailIgnoreOkUntil = System.currentTimeMillis() + 450
+                        } else {
+                            zap(1)
+                        }
+                        true
+                    }
                     Key.DirectionLeft -> {
-                        panelGroup = playGroup
-                        panel = PlayerPanel.Channels
-                        touch++
+                        if (inTimeshift) {
+                            timeshiftUi = true
+                            timelineFocused = true
+                            seekBy(-SEEK_STEP_MS)
+                            detailIgnoreOkUntil = System.currentTimeMillis() + 450
+                        } else {
+                            panelGroup = playGroup
+                            panel = PlayerPanel.Channels
+                            touch++
+                        }
                         true
                     }
                     Key.DirectionRight -> {
-                        panel = PlayerPanel.Epg
-                        touch++
+                        if (inTimeshift) {
+                            timeshiftUi = true
+                            timelineFocused = true
+                            seekBy(SEEK_STEP_MS)
+                            detailIgnoreOkUntil = System.currentTimeMillis() + 450
+                        } else {
+                            panel = PlayerPanel.Epg
+                            touch++
+                        }
                         true
                     }
                     Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
                     Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
                         if (inTimeshift) {
-                            // В timeshift (пауза или игра с буфера) — только карточка медиаплеера.
                             detail = false
                             timeshiftUi = true
                             detailIgnoreOkUntil = System.currentTimeMillis() + 450
@@ -759,12 +802,7 @@ fun PlayerScreen(
                 }
             }
             val maxMs = (maxBufferSec * 1000L).coerceAtLeast(1L)
-            val wall = if (pauseStartedAt > 0L) System.currentTimeMillis() - pauseStartedAt else 0L
-            val liveOff = exo.currentLiveOffset
-            val behindMs = when {
-                liveOff != C.TIME_UNSET && liveOff > 0L -> maxOf(liveOff, wall)
-                else -> maxOf(exo.totalBufferedDuration.coerceAtLeast(0L), wall)
-            }
+            val behindMs = realBehindMs()
             val behindForBar = (behindMs.toFloat() / maxMs.toFloat()).coerceIn(0f, 1f)
             Column(
                 Modifier
