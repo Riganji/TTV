@@ -165,6 +165,8 @@ fun PlayerScreen(
     var pinned by remember { mutableStateOf<String?>(null) }
     // Пауза (timeshift): playWhenReady=false; сегменты копятся на диске.
     var paused by remember { mutableStateOf(false) }
+    // Карточка медиаплеера timeshift (открывается по паузе / OK на паузе).
+    var timeshiftUi by remember { mutableStateOf(false) }
     // Размер буфера (сек) — настройка; смена пересоздаёт плеер и лимит SimpleCache.
     var maxBufferSec by remember { mutableIntStateOf(PlayerPrefs.getMaxBufferSec(context)) }
     // Занято кэшем / позиция timeshift (строки для UI, только на паузе).
@@ -223,6 +225,7 @@ fun PlayerScreen(
         slug = playlist[n]
         detail = false
         paused = false
+        timeshiftUi = false
     }
 
     fun formatShift(ms: Long): String {
@@ -240,28 +243,32 @@ fun PlayerScreen(
         return maxOf(disk, loaded, fromBuf, fromLive, pauseBaseBytes)
     }
 
-    /** Пауза / продолжить. На паузе открывается карточка медиаплеера (timeshift). */
+    /** Пауза / продолжить. При входе в паузу открывается карточка медиаплеера. */
     fun togglePause() {
         if (error != null || stream == null) return
         // Не срабатываем от того же OK, которым только что открыли карточку.
         if (System.currentTimeMillis() < detailIgnoreOkUntil) return
         if (paused) {
             paused = false
+            timeshiftUi = false
             detail = false
             exo.playWhenReady = true
         } else if (exo.isPlaying || exo.playbackState == Player.STATE_READY || exo.playbackState == Player.STATE_BUFFERING) {
             pauseBaseBytes = estimateBytesNow().coerceAtLeast(1L)
             pauseStartedAt = System.currentTimeMillis()
-            detail = false   // закрыть EPG-карточку — вместо неё панель плеера
+            detail = false
             paused = true
+            timeshiftUi = true
             exo.playWhenReady = false
             val off = exo.currentLiveOffset
-            val behind = if (off == C.TIME_UNSET || off < 0) exo.totalBufferedDuration.coerceAtLeast(0L) else off
+            val behind = if (off == C.TIME_UNSET || off < 0) {
+                exo.totalBufferedDuration.coerceAtLeast(0L)
+            } else {
+                off
+            }
             shiftLabel = formatShift(behind)
-            // МБ сразу от глубины timeshift, чтобы счётчик не «залипал».
-            cacheUsedMb = PlayerPrefs.formatMb(
-                maxOf(pauseBaseBytes, (behind / 1000.0 * PlayerPrefs.MB_PER_SEC * 1024.0 * 1024.0).toLong()),
-            )
+            val mb = (behind / 1000.0 * PlayerPrefs.MB_PER_SEC).coerceAtLeast(0.1)
+            cacheUsedMb = "кэш: ${"%.1f".format(mb)} МБ"
         }
     }
 
@@ -284,10 +291,11 @@ fun PlayerScreen(
     fun goLive() {
         if (System.currentTimeMillis() < detailIgnoreOkUntil) return
         paused = false
+        timeshiftUi = false
         StreamCache.clear()
         loadedBytesRef.set(0L)
         pauseBaseBytes = 0L
-        cacheUsedMb = "0 МБ"
+        cacheUsedMb = "кэш: 0.0 МБ"
         shiftLabel = "−0:00"
         exo.seekToDefaultPosition()
         exo.playWhenReady = true
@@ -445,8 +453,8 @@ fun PlayerScreen(
             }
             shiftLabel = formatShift(behindMs)
             // МБ всегда от отставания (≈0.5 МБ/с) — двигается вместе с таймером.
-            val fromBehind = (behindMs / 1000.0 * PlayerPrefs.MB_PER_SEC * 1024.0 * 1024.0).toLong()
-            cacheUsedMb = PlayerPrefs.formatMb(fromBehind.coerceAtLeast(1L))
+            val mb = (behindMs / 1000.0 * PlayerPrefs.MB_PER_SEC).coerceAtLeast(0.1)
+            cacheUsedMb = "кэш: ${"%.1f".format(mb)} МБ"
             delay(400)
         }
     }
@@ -455,6 +463,7 @@ fun PlayerScreen(
     LaunchedEffect(slug) {
         pinned = null
         paused = false
+        timeshiftUi = false
         loadedBytesRef.set(0L)
     }
     LaunchedEffect(slug, streamIdx) {
@@ -502,7 +511,8 @@ fun PlayerScreen(
             panel == PlayerPanel.Groups -> panel = PlayerPanel.Channels
             panel != PlayerPanel.None -> panel = PlayerPanel.None
             detail -> detail = false
-            paused -> togglePause()  // Назад на паузе = продолжить
+            timeshiftUi -> timeshiftUi = false  // закрыть плеер, видео остаётся на паузе
+            paused -> togglePause()             // ещё Назад — продолжить
             else -> onExit()
         }
     }
@@ -513,8 +523,8 @@ fun PlayerScreen(
             .background(Color.Black)
             .onPreviewKeyEvent { ev ->
                 if (panel != PlayerPanel.None || ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                // Карточка EPG или timeshift-плеер: стрелки/OK — фокус и нажатие кнопок.
-                if (detail || paused) {
+                // Карточка EPG или timeshift-плеер открыта: стрелки/OK — фокус и нажатие кнопок.
+                if (detail || timeshiftUi) {
                     return@onPreviewKeyEvent when (ev.key) {
                         Key.DirectionLeft, Key.DirectionRight,
                         Key.DirectionUp, Key.DirectionDown,
@@ -543,8 +553,15 @@ fun PlayerScreen(
                     }
                     Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
                     Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
-                        detail = true
-                        detailIgnoreOkUntil = System.currentTimeMillis() + 450
+                        if (paused) {
+                            // На timeshift OK открывает только карточку медиаплеера.
+                            timeshiftUi = true
+                            detail = false
+                            detailIgnoreOkUntil = System.currentTimeMillis() + 450
+                        } else {
+                            detail = true
+                            detailIgnoreOkUntil = System.currentTimeMillis() + 450
+                        }
                         true
                     }
                     Key.MediaPlayPause -> { togglePause(); true }
@@ -614,11 +631,11 @@ fun PlayerScreen(
             )
         }
 
-        // Timeshift — карточка как у медиаплеера (только на паузе)
-        if (paused && panel == PlayerPanel.None && error == null) {
+        // Timeshift — карточка медиаплеера (по паузе или OK на паузе)
+        if (paused && timeshiftUi && panel == PlayerPanel.None && error == null) {
             val playFocus = remember { FocusRequester() }
-            LaunchedEffect(paused) {
-                delay(150)
+            LaunchedEffect(timeshiftUi) {
+                delay(200)
                 try { playFocus.requestFocus() } catch (_: Exception) {}
             }
             // Доля заполнения шкалы: отставание / лимит буфера.
@@ -647,9 +664,10 @@ fun PlayerScreen(
                         Txt("$num${channel?.title ?: slug}", size = 26.sp, weight = FontWeight.Bold)
                         Txt("TIMESHIFT  $shiftLabel", size = 18.sp, color = Amber)
                     }
-                    Txt(cacheUsedMb, size = 22.sp, weight = FontWeight.Bold, color = Amber)
                 }
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(10.dp))
+                Txt(cacheUsedMb, size = 24.sp, weight = FontWeight.Bold, color = Amber)
+                Spacer(Modifier.height(12.dp))
                 // Шкала: начало буфера → позиция → эфир
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Txt(shiftLabel, size = 15.sp, color = TextDim)
