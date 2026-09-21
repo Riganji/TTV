@@ -19,11 +19,13 @@ class InstallReceiver : BroadcastReceiver() {
                 @Suppress("DEPRECATION")
                 val confirm = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
                 if (confirm == null) {
+                    UpdateRelaunch.disarm(context)
                     UpdateBus.report("система не открыла окно подтверждения")
                 } else {
                     try {
                         context.startActivity(confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                     } catch (e: Exception) {
+                        UpdateRelaunch.disarm(context)
                         UpdateBus.report("не открылось окно установки: ${e.message ?: e.javaClass.simpleName}")
                     }
                 }
@@ -31,13 +33,20 @@ class InstallReceiver : BroadcastReceiver() {
 
             PackageInstaller.STATUS_SUCCESS -> UpdateBus.report(null)
 
-            PackageInstaller.STATUS_FAILURE_ABORTED -> UpdateBus.report("установка отменена")
+            PackageInstaller.STATUS_FAILURE_ABORTED -> {
+                UpdateRelaunch.disarm(context)
+                UpdateBus.report("установка отменена")
+            }
 
-            PackageInstaller.STATUS_FAILURE_CONFLICT -> UpdateBus.report(
-                "подпись новой версии не совпадает с установленной — удалите приложение и поставьте заново",
-            )
+            PackageInstaller.STATUS_FAILURE_CONFLICT -> {
+                UpdateRelaunch.disarm(context)
+                UpdateBus.report(
+                    "подпись новой версии не совпадает с установленной — удалите приложение и поставьте заново",
+                )
+            }
 
             else -> {
+                UpdateRelaunch.disarm(context)
                 val msg = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
                 UpdateBus.report(msg?.takeIf { it.isNotBlank() } ?: "ошибка установки (код $status)")
             }

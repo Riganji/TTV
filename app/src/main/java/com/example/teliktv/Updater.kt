@@ -314,7 +314,14 @@ class Updater(private val context: Context) {
                 PendingIntent.FLAG_UPDATE_CURRENT
             }
             val pending = PendingIntent.getBroadcast(context, sessionId, intent, flags)
-            session.commit(pending.intentSender)
+            // Метка «открыть приложение после установки» — см. UpdateRelaunch.
+            UpdateRelaunch.arm(context)
+            try {
+                session.commit(pending.intentSender)
+            } catch (e: Exception) {
+                UpdateRelaunch.disarm(context)
+                throw e
+            }
         }
     }
 }

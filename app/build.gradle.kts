@@ -50,8 +50,8 @@ android {
         targetSdk = 35
         // versionName сравнивается с тегом релиза на GitHub (см. Updater.kt),
         // поэтому тег релиза должен быть «v<versionName>», например v0.3.0.
-        versionCode = 7
-        versionName = "0.3.1"
+        versionCode = 8
+        versionName = "0.3.2"
 
         buildConfigField("String", "UPDATE_REPO", "\"${setting("updateRepo", "UPDATE_REPO", "Riganji/TTV")}\"")
         buildConfigField("String", "UPDATE_TOKEN", "\"${hideToken(setting("updateToken", "UPDATE_TOKEN", ""))}\"")

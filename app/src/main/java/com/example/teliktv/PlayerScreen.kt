@@ -150,6 +150,8 @@ fun PlayerScreen(
     var liveRetries by remember { mutableIntStateOf(0) }   // подряд BEHIND_LIVE_WINDOW без выхода в READY
     // slug -> индексы потоков, для которых уже была одна повторная попытка после malformed-ошибки.
     val manifestRetried = remember { mutableStateMapOf<String, Set<Int>>() }
+    // slug канала, у которого поток выбран вручную из меню: при сбое сами на другой поток не прыгаем.
+    var pinned by remember { mutableStateOf<String?>(null) }
 
     // ---- действия
 
@@ -186,6 +188,11 @@ fun PlayerScreen(
         val cur = (chosen[s] ?: 0).coerceIn(0, (list.size - 1).coerceAtLeast(0))
         val failed = (failedStreams[s] ?: emptySet()) + cur
         failedStreams[s] = failed
+        // Поток выбран вручную — не перескакиваем сами: показываем причину, дальше выбирает пользователь.
+        if (pinned == s) {
+            error = "«${list.getOrNull(cur)?.label ?: "Поток"}» не открылся ($reason)"
+            return
+        }
         val next = (1..list.size).map { (cur + it) % list.size }.firstOrNull { it !in failed }
         when {
             next != null -> {
@@ -238,6 +245,19 @@ fun PlayerScreen(
                         nonce++
                         return
                     }
+                    // Повтор не помог. Код ошибки не говорит, что именно пришло вместо плейлиста
+                    // (HTML-заглушка, пустой ответ, битый плейлист) — спрашиваем саму ссылку.
+                    val failedStream = bySlugState[s]?.streams?.getOrNull(idx)
+                    if (failedStream != null) {
+                        scope.launch {
+                            val why = StreamProbe.describe(failedStream)
+                            // Пока шёл запрос, пользователь мог переключить поток или канал — тогда результат не нужен.
+                            if (currentSlug == s && (chosen[s] ?: 0) == idx) {
+                                onStreamFailed("${e.errorCodeName}: $why")
+                            }
+                        }
+                        return
+                    }
                 }
                 onStreamFailed(e.errorCodeName)
             }
@@ -280,6 +300,7 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(slug, playGroup) { onCurrent(slug, playGroup) }
+    LaunchedEffect(slug) { pinned = null }
     LaunchedEffect(slug, streamIdx) {
         brief = true
         delay(3500)
@@ -415,7 +436,7 @@ fun PlayerScreen(
                 if (reloading) {
                     Txt("Обновляю ссылки канала…", size = 22.sp)
                 } else if (err != null) {
-                    Txt(err, size = 22.sp, color = ErrorRed)
+                    Txt(err, size = 22.sp, color = ErrorRed, maxLines = 3)
                     Spacer(Modifier.height(6.dp))
                     Txt("Menu — выбрать поток вручную, ↑ ↓ другой канал", size = 18.sp, color = TextDim)
                 }
@@ -596,7 +617,10 @@ fun PlayerScreen(
                             onClick = {
                                 chosen[slug] = i
                                 failedStreams.remove(slug)
+                                manifestRetried.remove(slug)
                                 retried = retried - slug
+                                pinned = slug
+                                nonce++   // тот же поток выбран повторно — тоже перезапускаем
                                 panel = PlayerPanel.None
                             },
                         ) { focused ->
