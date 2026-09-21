@@ -55,6 +55,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -84,11 +85,13 @@ private val MANIFEST_RETRY_CODES = setOf(
  *  ←                  — список каналов (ещё раз ← — категории, включая «Избранное»)
  *  →                  — телепрограмма; на паузе — возврат в прямой эфир
  *  Menu               — выбор потока
- *  OK                 — пауза (timeshift) / продолжить с буфера
+ *  OK                 — карточка «сейчас / далее»; на паузе — продолжить
+ *  Пауза              — в настройках (шестерёнка) или Play/Pause на пульте
  *  Назад              — закрыть панель / выйти в список
  * Если поток не открылся или не стартует за Config.STREAM_TIMEOUT_MS — автоматически включается
  * следующий поток канала; когда исчерпаны все — один раз перепарсивается канал и всё повторяется.
  * Манифест/контейнер: 1 повтор того же потока, после 2-й ошибки — сразу следующий поток.
+ * Timeshift: сегменты на диске (cacheDir/stream_cache), до 1 часа.
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -154,14 +157,16 @@ fun PlayerScreen(
     val manifestRetried = remember { mutableStateMapOf<String, Set<Int>>() }
     // slug канала, у которого поток выбран вручную из меню: при сбое сами на другой поток не прыгаем.
     var pinned by remember { mutableStateOf<String?>(null) }
-    // Пауза (timeshift): playWhenReady=false, позиция в буфере сохраняется.
+    // Пауза (timeshift): playWhenReady=false; сегменты копятся на диске.
     var paused by remember { mutableStateOf(false) }
-    // Размер буфера (сек) — настройка; смена пересоздаёт плеер.
+    // Размер буфера (сек) — настройка; смена пересоздаёт плеер и лимит SimpleCache.
     var maxBufferSec by remember { mutableIntStateOf(PlayerPrefs.getMaxBufferSec(context)) }
+    // Занято кэшем на диске (МБ), обновляется на паузе.
+    var cacheUsedMb by remember { mutableStateOf("0 МБ") }
 
     // ---- плеер (создаём до действий, которые к нему обращаются)
-    // maxBufferMs ≈ время, на которое можно поставить паузу на live-потоке.
     val exo = remember(maxBufferSec) {
+        StreamCache.get(context, PlayerPrefs.maxCacheBytes(maxBufferSec))
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 /* minBufferMs */ 15_000,
@@ -200,9 +205,11 @@ fun PlayerScreen(
         }
     }
 
-    /** В прямой эфир: seek на live edge (сброс позиции timeshift / «очистка кэша» по позиции). */
+    /** В прямой эфир: seek на live edge + очистка дискового кэша. */
     fun goLive() {
         paused = false
+        StreamCache.clear()
+        cacheUsedMb = "0 МБ"
         exo.seekToDefaultPosition()
         exo.playWhenReady = true
         notice = "прямой эфир"
@@ -335,13 +342,22 @@ fun PlayerScreen(
             exo.stop()
             return@LaunchedEffect
         }
-        exo.setMediaSource(buildSource(context, stream))
+        exo.setMediaSource(buildSource(context, stream, maxBufferSec))
         exo.prepare()
         exo.playWhenReady = true
         // «Висящий» поток без ошибки тоже считаем нерабочим.
         delay(Config.STREAM_TIMEOUT_MS)
         if (!inBackground && !paused && exo.playbackState != Player.STATE_READY) {
             onStreamFailed("нет ответа за ${Config.STREAM_TIMEOUT_MS / 1000} с")
+        }
+    }
+
+    // На паузе раз в секунду обновляем счётчик занятого дискового кэша.
+    LaunchedEffect(paused) {
+        if (!paused) return@LaunchedEffect
+        while (true) {
+            cacheUsedMb = PlayerPrefs.formatMb(StreamCache.usedBytes())
+            delay(1_000)
         }
     }
 
@@ -415,7 +431,7 @@ fun PlayerScreen(
                         true
                     }
                     Key.DirectionRight -> {
-                        // На паузе → — в прямой эфир (сброс timeshift); иначе телепрограмма.
+                        // На паузе → — в прямой эфир; иначе телепрограмма.
                         if (paused) goLive() else {
                             panel = PlayerPanel.Epg
                             touch++
@@ -424,9 +440,8 @@ fun PlayerScreen(
                     }
                     Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
                     Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
-                        // OK — пауза / продолжить с буфера (на типичном ТВ-пульте нет Play/Pause).
-                        if (detail) detail = false
-                        togglePause()
+                        // OK — карточка «сейчас / далее»; на паузе — продолжить.
+                        if (paused) togglePause() else detail = !detail
                         true
                     }
                     Key.MediaPlayPause -> { togglePause(); true }
@@ -494,7 +509,7 @@ fun PlayerScreen(
             )
         }
 
-        // Пауза (timeshift)
+        // Пауза (timeshift) — счётчик занятого кэша на диске
         if (paused && panel == PlayerPanel.None && error == null) {
             Column(
                 Modifier
@@ -505,13 +520,15 @@ fun PlayerScreen(
             ) {
                 Txt("ПАУЗА", size = 28.sp, weight = FontWeight.Bold, color = Amber)
                 Spacer(Modifier.height(8.dp))
+                Txt("кэш: $cacheUsedMb", size = 22.sp, weight = FontWeight.Bold)
+                Spacer(Modifier.height(6.dp))
                 Txt(
                     "OK — продолжить   ·   → — в эфир",
                     size = 17.sp,
                     color = TextDim,
                 )
                 Txt(
-                    "буфер ${PlayerPrefs.hint(maxBufferSec)}",
+                    "лимит ${PlayerPrefs.hint(maxBufferSec)}",
                     size = 15.sp,
                     color = TextDim,
                 )
@@ -661,7 +678,16 @@ fun PlayerScreen(
                             val next = PlayerPrefs.next(maxBufferSec)
                             PlayerPrefs.setMaxBufferSec(context, next)
                             maxBufferSec = next
-                            notice = "буфер: ${PlayerPrefs.hint(next)}"
+                            notice = "кэш: ${PlayerPrefs.hint(next)}"
+                        },
+                        paused = paused,
+                        onTogglePause = {
+                            togglePause()
+                            panel = PlayerPanel.None
+                        },
+                        onGoLive = {
+                            goLive()
+                            panel = PlayerPanel.None
                         },
                         onRefreshChannels = {
                             panel = PlayerPanel.None
@@ -755,9 +781,9 @@ fun PlayerScreen(
     }
 }
 
-/** Ссылки отдаются с проверкой Referer — как #EXTVLCOPT в playlist.m3u из parser.py. */
+/** Ссылки отдаются с проверкой Referer; сегменты пишутся в дисковый SimpleCache. */
 @OptIn(UnstableApi::class)
-private fun buildSource(context: Context, s: StreamItem): MediaSource {
+private fun buildSource(context: Context, s: StreamItem, maxBufferSec: Int): MediaSource {
     val http = DefaultHttpDataSource.Factory()
         .setUserAgent(Config.UA)
         .setAllowCrossProtocolRedirects(true)
@@ -768,7 +794,12 @@ private fun buildSource(context: Context, s: StreamItem): MediaSource {
         // получает половину плейлиста и падает с PARSING_MANIFEST_MALFORMED. Плейлисты
         // маленькие, разжимать их всё равно не нужно.
         .setDefaultRequestProperties(mapOf("Referer" to s.referer, "Accept-Encoding" to "identity"))
+    val cache = StreamCache.get(context, PlayerPrefs.maxCacheBytes(maxBufferSec))
+    val cached = CacheDataSource.Factory()
+        .setCache(cache)
+        .setUpstreamDataSourceFactory(http)
+        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
     val mime = if (Extract.isDash(s.url)) MimeTypes.APPLICATION_MPD else MimeTypes.APPLICATION_M3U8
     val item = MediaItem.Builder().setUri(s.url).setMimeType(mime).build()
-    return DefaultMediaSourceFactory(DefaultDataSource.Factory(context, http)).createMediaSource(item)
+    return DefaultMediaSourceFactory(DefaultDataSource.Factory(context, cached)).createMediaSource(item)
 }

@@ -51,7 +51,7 @@ android {
         // versionName сравнивается с тегом релиза на GitHub (см. Updater.kt),
         // поэтому тег релиза должен быть «v<versionName>», например v0.3.0.
         versionCode = 9
-        versionName = "0.3.3"
+        versionName = "0.3.9"
 
         buildConfigField("String", "UPDATE_REPO", "\"${setting("updateRepo", "UPDATE_REPO", "Riganji/TTV")}\"")
         buildConfigField("String", "UPDATE_TOKEN", "\"${hideToken(setting("updateToken", "UPDATE_TOKEN", ""))}\"")
@@ -118,6 +118,8 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-hls:$media3")
     implementation("androidx.media3:media3-exoplayer-dash:$media3")
     implementation("androidx.media3:media3-ui:$media3")
+    implementation("androidx.media3:media3-database:$media3")
+    implementation("androidx.media3:media3-datasource:$media3")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("io.coil-kt:coil-compose:2.7.0")

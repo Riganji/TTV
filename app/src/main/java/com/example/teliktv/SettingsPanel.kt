@@ -19,6 +19,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -46,70 +47,113 @@ fun SettingsPanel(
     update: UpdateState,
     maxBufferSec: Int = PlayerPrefs.DEFAULT_SEC,
     onBufferCycle: () -> Unit = {},
+    /** null — пункт паузы не показываем (список каналов). */
+    paused: Boolean? = null,
+    onTogglePause: (() -> Unit)? = null,
+    onGoLive: (() -> Unit)? = null,
     onRefreshChannels: () -> Unit,
     onRefreshEpg: () -> Unit,
     onShowReport: () -> Unit,
     onUpdate: () -> Unit,
 ) {
-    // Список пересобирается на каждой перекомпозиции — подписи показывают текущий статус.
-    val items = listOf(
-        SettingsItem(
-            title = "Размер кэша (пауза)",
-            hint = PlayerPrefs.hint(maxBufferSec) + " — OK, сменить",
-            onClick = onBufferCycle,
-        ),
-        SettingsItem(
-            title = "Обновить каналы",
-            hint = if (status.loading) {
-                "идёт обновление: ${status.done} из ${status.total}"
-            } else {
-                "заново разобрать ссылки на все потоки"
-            },
-            onClick = onRefreshChannels,
-        ),
-        SettingsItem(
-            title = "Обновить телепрограмму",
-            hint = when {
-                epgStatus.loading -> "загружается…"
-                epgStatus.error != null -> "ошибка: ${epgStatus.error}"
-                epg.updatedAt == 0L -> "данных пока нет"
-                else -> "сейчас есть у ${epgStatus.matched} из ${epgStatus.total} каналов"
-            },
-            hintColor = if (epgStatus.error != null) ErrorRed else TextDim,
-            onClick = onRefreshEpg,
-        ),
-        SettingsItem(
-            title = "Отчёт о загрузке",
-            hint = if (failures.isEmpty()) {
-                "все каналы загрузились"
-            } else {
-                "не загрузились каналов: ${failures.size}"
-            },
-            hintColor = if (failures.isEmpty()) TextDim else ErrorRed,
-            onClick = onShowReport,
-        ),
-        SettingsItem(
-            title = if (update.available != null) "Обновить приложение" else "Обновление",
-            hint = when {
-                update.checking -> "проверяю релизы на GitHub…"
-                update.downloading ->
-                    if (update.progress >= 0) "загрузка: ${update.progress}%" else "загрузка…"
-                update.installing -> "устанавливаю — подтвердите на экране системы"
-                update.error != null -> "ошибка: ${update.error}"
-                update.available != null ->
-                    "доступна версия ${update.available.version} — OK, установить"
-                update.checkedAt > 0L -> "установлена последняя версия — OK, проверить ещё раз"
-                else -> "проверить обновление на GitHub"
-            },
-            hintColor = when {
-                update.error != null -> ErrorRed
-                update.available != null -> Amber
-                else -> TextDim
-            },
-            extra = update.available?.notes?.takeIf { it.isNotBlank() }?.replace(Regex("\\s+"), " "),
-            onClick = onUpdate,
-        ),
-    )
+    val context = LocalContext.current
+    val freeBytes = remember(maxBufferSec) { StreamCache.freeDiskBytes(context) }
+
+    val items = buildList {
+        if (onTogglePause != null && paused != null) {
+            add(
+                SettingsItem(
+                    title = if (paused) "Продолжить" else "Пауза",
+                    hint = if (paused) {
+                        "с позиции в кэше · OK"
+                    } else {
+                        "timeshift, кэш на диске до ${PlayerPrefs.hint(maxBufferSec)}"
+                    },
+                    onClick = onTogglePause,
+                ),
+            )
+            if (paused && onGoLive != null) {
+                add(
+                    SettingsItem(
+                        title = "В прямой эфир",
+                        hint = "сбросить timeshift и очистить кэш",
+                        onClick = onGoLive,
+                    ),
+                )
+            }
+        }
+        add(
+            SettingsItem(
+                title = "Размер кэша (пауза)",
+                hint = PlayerPrefs.settingsHint(maxBufferSec, freeBytes),
+                hintColor = if (freeBytes < PlayerPrefs.estimateMb(maxBufferSec) * 1024L * 1024L) {
+                    ErrorRed
+                } else {
+                    TextDim
+                },
+                onClick = onBufferCycle,
+            ),
+        )
+        add(
+            SettingsItem(
+                title = "Обновить каналы",
+                hint = if (status.loading) {
+                    "идёт обновление: ${status.done} из ${status.total}"
+                } else {
+                    "заново разобрать ссылки на все потоки"
+                },
+                onClick = onRefreshChannels,
+            ),
+        )
+        add(
+            SettingsItem(
+                title = "Обновить телепрограмму",
+                hint = when {
+                    epgStatus.loading -> "загружается…"
+                    epgStatus.error != null -> "ошибка: ${epgStatus.error}"
+                    epg.updatedAt == 0L -> "данных пока нет"
+                    else -> "сейчас есть у ${epgStatus.matched} из ${epgStatus.total} каналов"
+                },
+                hintColor = if (epgStatus.error != null) ErrorRed else TextDim,
+                onClick = onRefreshEpg,
+            ),
+        )
+        add(
+            SettingsItem(
+                title = "Отчёт о загрузке",
+                hint = if (failures.isEmpty()) {
+                    "все каналы загрузились"
+                } else {
+                    "не загрузились каналов: ${failures.size}"
+                },
+                hintColor = if (failures.isEmpty()) TextDim else ErrorRed,
+                onClick = onShowReport,
+            ),
+        )
+        add(
+            SettingsItem(
+                title = if (update.available != null) "Обновить приложение" else "Обновление",
+                hint = when {
+                    update.checking -> "проверяю релизы на GitHub…"
+                    update.downloading ->
+                        if (update.progress >= 0) "загрузка: ${update.progress}%" else "загрузка…"
+                    update.installing -> "устанавливаю — подтвердите на экране системы"
+                    update.error != null -> "ошибка: ${update.error}"
+                    update.available != null ->
+                        "доступна версия ${update.available.version} — OK, установить"
+                    update.checkedAt > 0L -> "установлена последняя версия — OK, проверить ещё раз"
+                    else -> "проверить обновление на GitHub"
+                },
+                hintColor = when {
+                    update.error != null -> ErrorRed
+                    update.available != null -> Amber
+                    else -> TextDim
+                },
+                extra = update.available?.notes?.takeIf { it.isNotBlank() }?.replace(Regex("\\s+"), " "),
+                onClick = onUpdate,
+            ),
+        )
+    }
 
     val first = remember { FocusRequester() }
     LaunchedEffect(Unit) {
@@ -136,7 +180,6 @@ fun SettingsPanel(
                 GearIcon(Amber, iconSize = 26.dp)
                 Spacer(Modifier.width(12.dp))
                 Txt("Настройки", Modifier.weight(1f), size = 28.sp, weight = FontWeight.Bold)
-                // Текущая версия видна всегда — по ней понятно, нужно ли обновляться.
                 Txt(
                     "версия ${update.current}",
                     size = 16.sp,
