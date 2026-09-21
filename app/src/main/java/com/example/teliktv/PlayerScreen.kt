@@ -352,12 +352,15 @@ fun PlayerScreen(
         }
     }
 
-    // На паузе раз в секунду обновляем счётчик занятого дискового кэша.
-    LaunchedEffect(paused) {
-        if (!paused) return@LaunchedEffect
+    // Счётчик кэша: диск + оценка по буферу плеера (обновляем на паузе и в карточке).
+    LaunchedEffect(paused, detail) {
+        if (!paused && !detail) return@LaunchedEffect
         while (true) {
-            cacheUsedMb = PlayerPrefs.formatMb(StreamCache.usedBytes())
-            delay(1_000)
+            val disk = StreamCache.usedBytes(context)
+            val bufMs = exo.totalBufferedDuration.coerceAtLeast(0L)
+            val fromPlayer = (bufMs / 1000.0 * PlayerPrefs.MB_PER_SEC * 1024.0 * 1024.0).toLong()
+            cacheUsedMb = PlayerPrefs.formatMb(maxOf(disk, fromPlayer))
+            delay(500)
         }
     }
 
@@ -421,6 +424,18 @@ fun PlayerScreen(
             .background(Color.Black)
             .onPreviewKeyEvent { ev ->
                 if (panel != PlayerPanel.None || ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                // Карточка OK открыта: стрелки и OK — только навигация/нажатие кнопок (FocusItem).
+                if (detail) {
+                    return@onPreviewKeyEvent when (ev.key) {
+                        Key.DirectionLeft, Key.DirectionRight,
+                        Key.DirectionUp, Key.DirectionDown,
+                        Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> false
+                        // Не переключаем канал, пока открыта карточка.
+                        Key.ChannelUp, Key.ChannelDown, Key.PageUp, Key.PageDown -> true
+                        Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
+                        else -> false
+                    }
+                }
                 when (ev.key) {
                     Key.DirectionUp, Key.ChannelUp, Key.PageUp -> { zap(-1); true }
                     Key.DirectionDown, Key.ChannelDown, Key.PageDown -> { zap(1); true }
@@ -431,21 +446,14 @@ fun PlayerScreen(
                         true
                     }
                     Key.DirectionRight -> {
-                        // На паузе → — в прямой эфир; иначе телепрограмма.
-                        if (paused) goLive() else {
-                            panel = PlayerPanel.Epg
-                            touch++
-                        }
+                        panel = PlayerPanel.Epg
+                        touch++
                         true
                     }
                     Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
                     Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
-                        // OK — открыть карточку «сейчас / далее» (с кнопкой паузы).
-                        // Если карточка уже открыта — не перехватываем: OK уходит на FocusItem.
-                        if (detail) false else {
-                            detail = true
-                            true
-                        }
+                        detail = true
+                        true
                     }
                     Key.MediaPlayPause -> { togglePause(); true }
                     Key.MediaPause -> {
@@ -606,7 +614,10 @@ fun PlayerScreen(
                     for (p in next) Txt("${Epg.time(p.start)}   ${p.title}", size = 18.sp, color = TextMain)
                 }
                 Spacer(Modifier.height(16.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     FocusItem(
                         focusRequester = pauseFocus,
                         onClick = { togglePause() },
@@ -627,16 +638,16 @@ fun PlayerScreen(
                                 color = if (focused) OnAmber else TextMain,
                             )
                         }
-                        Txt(
-                            "кэш: $cacheUsedMb",
-                            size = 18.sp,
-                            color = TextDim,
-                        )
                     }
+                    Txt("кэш: $cacheUsedMb", size = 18.sp, color = TextDim)
                 }
                 Spacer(Modifier.height(8.dp))
                 Txt(
-                    if (paused) "OK — продолжить / в эфир     Назад — закрыть" else "OK — пауза     Назад — закрыть",
+                    if (paused) {
+                        "← → кнопки     OK — нажать     Назад — закрыть"
+                    } else {
+                        "OK — пауза     ← → кнопки     Назад — закрыть"
+                    },
                     size = 15.sp,
                     color = TextDim,
                 )
@@ -840,11 +851,16 @@ private fun buildSource(context: Context, s: StreamItem, maxBufferSec: Int): Med
         // маленькие, разжимать их всё равно не нужно.
         .setDefaultRequestProperties(mapOf("Referer" to s.referer, "Accept-Encoding" to "identity"))
     val cache = StreamCache.get(context, PlayerPrefs.maxCacheBytes(maxBufferSec))
+    // Пишем сегменты на диск всегда (live часто шлёт no-store — без sink кэш остаётся пустым).
+    val sink = androidx.media3.datasource.cache.CacheDataSink.Factory()
+        .setCache(cache)
+        .setFragmentSize(2 * 1024 * 1024)
     val cached = CacheDataSource.Factory()
         .setCache(cache)
         .setUpstreamDataSourceFactory(http)
+        .setCacheWriteDataSinkFactory(sink)
         .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
     val mime = if (Extract.isDash(s.url)) MimeTypes.APPLICATION_MPD else MimeTypes.APPLICATION_M3U8
     val item = MediaItem.Builder().setUri(s.url).setMimeType(mime).build()
-    return DefaultMediaSourceFactory(DefaultDataSource.Factory(context, cached)).createMediaSource(item)
+    return DefaultMediaSourceFactory(cached).createMediaSource(item)
 }

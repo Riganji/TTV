@@ -38,8 +38,22 @@ object StreamCache {
         }
     }
 
-    /** Занято кэшем, байт. */
-    fun usedBytes(): Long = synchronized(lock) { cache?.cacheSpace ?: 0L }
+    /** Занято кэшем, байт (SimpleCache + фактический размер каталога). */
+    fun usedBytes(context: Context? = null): Long = synchronized(lock) {
+        val fromApi = cache?.cacheSpace ?: 0L
+        val fromDir = if (context != null) {
+            try {
+                File(context.cacheDir, DIR).walkTopDown()
+                    .filter { it.isFile }
+                    .sumOf { it.length() }
+            } catch (_: Exception) {
+                0L
+            }
+        } else {
+            0L
+        }
+        maxOf(fromApi, fromDir)
+    }
 
     /** Свободно на разделе cacheDir, байт. */
     fun freeDiskBytes(context: Context): Long =
