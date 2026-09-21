@@ -82,10 +82,9 @@ private val MANIFEST_RETRY_CODES = setOf(
  * Управление пультом (панели закрыты):
  *  ↑ / ↓ (и CH+/CH−)  — предыдущий / следующий канал в текущей группе
  *  ←                  — список каналов (ещё раз ← — категории, включая «Избранное»)
- *  →                  — телепрограмма текущего канала
+ *  →                  — телепрограмма; на паузе — возврат в прямой эфир
  *  Menu               — выбор потока
- *  OK                 — карточка «сейчас / далее» из телепрограммы
- *  Play/Pause         — пауза (timeshift) / продолжить; повторный Play на паузе — в эфир
+ *  OK                 — пауза (timeshift) / продолжить с буфера
  *  Назад              — закрыть панель / выйти в список
  * Если поток не открылся или не стартует за Config.STREAM_TIMEOUT_MS — автоматически включается
  * следующий поток канала; когда исчерпаны все — один раз перепарсивается канал и всё повторяется.
@@ -415,11 +414,19 @@ fun PlayerScreen(
                         touch++
                         true
                     }
-                    Key.DirectionRight -> { panel = PlayerPanel.Epg; touch++; true }
+                    Key.DirectionRight -> {
+                        // На паузе → — в прямой эфир (сброс timeshift); иначе телепрограмма.
+                        if (paused) goLive() else {
+                            panel = PlayerPanel.Epg
+                            touch++
+                        }
+                        true
+                    }
                     Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
                     Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
-                        // На паузе OK — в прямой эфир (сброс timeshift / «очистка кэша»).
-                        if (paused) goLive() else detail = !detail
+                        // OK — пауза / продолжить с буфера (на типичном ТВ-пульте нет Play/Pause).
+                        if (detail) detail = false
+                        togglePause()
                         true
                     }
                     Key.MediaPlayPause -> { togglePause(); true }
@@ -428,7 +435,7 @@ fun PlayerScreen(
                         true
                     }
                     Key.MediaPlay -> {
-                        if (paused) togglePause()  // продолжить с буфера
+                        if (paused) togglePause()
                         true
                     }
                     else -> false
@@ -499,12 +506,12 @@ fun PlayerScreen(
                 Txt("ПАУЗА", size = 28.sp, weight = FontWeight.Bold, color = Amber)
                 Spacer(Modifier.height(8.dp))
                 Txt(
-                    "Play — продолжить   ·   OK — в эфир",
+                    "OK — продолжить   ·   → — в эфир",
                     size = 17.sp,
                     color = TextDim,
                 )
                 Txt(
-                    "буфер до ${PlayerPrefs.hint(maxBufferSec)}",
+                    "буфер ${PlayerPrefs.hint(maxBufferSec)}",
                     size = 15.sp,
                     color = TextDim,
                 )
