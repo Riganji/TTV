@@ -285,6 +285,13 @@ fun PlayerScreen(
         notice = "прямой эфир"
     }
 
+    /** Реальная глубина timeshift по данным плеера (без «настенных» часов). */
+    fun realBehindMs(): Long {
+        val liveOff = exo.currentLiveOffset
+        if (liveOff != C.TIME_UNSET && liveOff > 0L) return liveOff
+        return exo.totalBufferedDuration.coerceAtLeast(0L)
+    }
+
     /** Пауза / продолжить. Вход в паузу включает timeshift и карточку плеера. */
     fun togglePause() {
         if (error != null || stream == null) return
@@ -317,13 +324,6 @@ fun PlayerScreen(
             val mb = (behind / 1000.0 * PlayerPrefs.MB_PER_SEC).coerceAtLeast(0.1)
             cacheUsedMb = "кэш: ${"%.1f".format(mb)} МБ"
         }
-    }
-
-    /** Реальная глубина timeshift по данным плеера (без «настенных» часов). */
-    fun realBehindMs(): Long {
-        val liveOff = exo.currentLiveOffset
-        if (liveOff != C.TIME_UNSET && liveOff > 0L) return liveOff
-        return exo.totalBufferedDuration.coerceAtLeast(0L)
     }
 
     /**
