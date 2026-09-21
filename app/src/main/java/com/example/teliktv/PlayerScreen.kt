@@ -72,7 +72,7 @@ private enum class PlayerPanel { None, Channels, Groups, Streams, Epg, Settings 
 private const val MAX_LIVE_RETRIES = 3
 
 /** Шаг перемотки в timeshift. */
-private const val SEEK_STEP_MS = 10_000L
+private const val SEEK_STEP_MS = 5_000L
 
 /**
  * Сетевые / разбор манифеста — часто разовая случайность. Один повтор того же потока,
@@ -189,6 +189,8 @@ fun PlayerScreen(
     var inTimeshift by remember { mutableStateOf(false) }
     // Карточка медиаплеера (открывается по паузе / OK в режиме timeshift).
     var timeshiftUi by remember { mutableStateOf(false) }
+    // Фокус на таймлайне timeshift (↑): ← → — перемотка.
+    var timelineFocused by remember { mutableStateOf(false) }
     // Размер буфера (сек) — настройка; смена пересоздаёт плеер и лимит SimpleCache.
     var maxBufferSec by remember { mutableIntStateOf(PlayerPrefs.getMaxBufferSec(context)) }
     // Занято кэшем / позиция timeshift (строки для UI, только на паузе).
@@ -271,6 +273,7 @@ fun PlayerScreen(
         paused = false
         inTimeshift = false
         timeshiftUi = false
+        timelineFocused = false
         timeshiftIoRetries = 0
         StreamCache.clear()
         loadedBytesRef.set(0L)
@@ -307,6 +310,7 @@ fun PlayerScreen(
             detail = false
             paused = true
             timeshiftUi = true
+            timelineFocused = false
             exo.playWhenReady = false
             val off = exo.currentLiveOffset
             val behind = if (off == C.TIME_UNSET || off < 0) {
@@ -502,6 +506,16 @@ fun PlayerScreen(
         }
     }
 
+    // После «Продолжить» карточка сама скрывается через 5 с (сброс при активности).
+    LaunchedEffect(timeshiftUi, paused, touch) {
+        if (!timeshiftUi || paused) return@LaunchedEffect
+        delay(5_000)
+        if (timeshiftUi && !paused) {
+            timeshiftUi = false
+            timelineFocused = false
+        }
+    }
+
     // Счётчик на всём timeshift (пауза или воспроизведение с буфера).
     LaunchedEffect(inTimeshift) {
         if (!inTimeshift) return@LaunchedEffect
@@ -586,17 +600,58 @@ fun PlayerScreen(
             .background(Color.Black)
             .onPreviewKeyEvent { ev ->
                 if (panel != PlayerPanel.None || ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                // Карточка EPG или timeshift-плеер открыта: стрелки/OK — фокус и нажатие кнопок.
-                if (detail || timeshiftUi) {
+                // Timeshift-карточка: ↑ таймлайн (← → перемотка), ↓ кнопки, OK — нажать.
+                if (timeshiftUi) {
+                    touch++  // сброс автоскрытия
+                    return@onPreviewKeyEvent when (ev.key) {
+                        Key.DirectionUp -> {
+                            timelineFocused = true
+                            true
+                        }
+                        Key.DirectionDown -> {
+                            timelineFocused = false
+                            true
+                        }
+                        Key.DirectionLeft -> {
+                            if (timelineFocused) {
+                                seekBy(-SEEK_STEP_MS)
+                                true
+                            } else {
+                                false  // фокус между кнопками
+                            }
+                        }
+                        Key.DirectionRight -> {
+                            if (timelineFocused) {
+                                seekBy(SEEK_STEP_MS)
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
+                            if (timelineFocused) {
+                                // на таймлайне OK не жмёт кнопки
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        Key.ChannelUp, Key.ChannelDown, Key.PageUp, Key.PageDown -> true
+                        Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
+                        Key.MediaRewind -> { seekBy(-SEEK_STEP_MS); true }
+                        Key.MediaFastForward -> { seekBy(SEEK_STEP_MS); true }
+                        Key.MediaPlayPause, Key.MediaPlay, Key.MediaPause -> { togglePause(); true }
+                        else -> false
+                    }
+                }
+                // Карточка EPG: стрелки/OK — фокус и нажатие кнопок.
+                if (detail) {
                     return@onPreviewKeyEvent when (ev.key) {
                         Key.DirectionLeft, Key.DirectionRight,
                         Key.DirectionUp, Key.DirectionDown,
                         Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> false
                         Key.ChannelUp, Key.ChannelDown, Key.PageUp, Key.PageDown -> true
                         Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
-                        Key.MediaRewind -> { if (inTimeshift) seekBy(-SEEK_STEP_MS); true }
-                        Key.MediaFastForward -> { if (inTimeshift) seekBy(SEEK_STEP_MS); true }
-                        Key.MediaPlayPause, Key.MediaPlay, Key.MediaPause -> { togglePause(); true }
                         else -> false
                     }
                 }
@@ -697,22 +752,20 @@ fun PlayerScreen(
         // Timeshift — карточка медиаплеера (пауза или воспроизведение с буфера)
         if (inTimeshift && timeshiftUi && panel == PlayerPanel.None && error == null) {
             val playFocus = remember { FocusRequester() }
-            LaunchedEffect(timeshiftUi) {
-                delay(200)
-                try { playFocus.requestFocus() } catch (_: Exception) {}
-            }
-            // Доля заполнения шкалы: отставание / лимит буфера.
-            val maxMs = (maxBufferSec * 1000L).coerceAtLeast(1L)
-            val behindForBar = shiftLabel.trimStart('−').let { lab ->
-                // bar from liveOffset estimate via cache string is fragile; use pause clock
-                val wall = if (pauseStartedAt > 0L) System.currentTimeMillis() - pauseStartedAt else 0L
-                val liveOff = exo.currentLiveOffset
-                val b = when {
-                    liveOff != C.TIME_UNSET && liveOff > 0L -> maxOf(liveOff, wall)
-                    else -> maxOf(exo.totalBufferedDuration.coerceAtLeast(0L), wall)
+            LaunchedEffect(timeshiftUi, timelineFocused) {
+                if (!timelineFocused) {
+                    delay(200)
+                    try { playFocus.requestFocus() } catch (_: Exception) {}
                 }
-                (b.toFloat() / maxMs.toFloat()).coerceIn(0f, 1f)
             }
+            val maxMs = (maxBufferSec * 1000L).coerceAtLeast(1L)
+            val wall = if (pauseStartedAt > 0L) System.currentTimeMillis() - pauseStartedAt else 0L
+            val liveOff = exo.currentLiveOffset
+            val behindMs = when {
+                liveOff != C.TIME_UNSET && liveOff > 0L -> maxOf(liveOff, wall)
+                else -> maxOf(exo.totalBufferedDuration.coerceAtLeast(0L), wall)
+            }
+            val behindForBar = (behindMs.toFloat() / maxMs.toFloat()).coerceIn(0f, 1f)
             Column(
                 Modifier
                     .align(Alignment.BottomCenter)
@@ -731,13 +784,22 @@ fun PlayerScreen(
                 Spacer(Modifier.height(10.dp))
                 Txt(cacheUsedMb, size = 24.sp, weight = FontWeight.Bold, color = Amber)
                 Spacer(Modifier.height(12.dp))
-                // Шкала: начало буфера → позиция → эфир
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Txt(shiftLabel, size = 15.sp, color = TextDim)
+                // Таймлайн: ↑ фокус, ← → перемотка по 5 с
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(
+                            if (timelineFocused) Color(0x44F2B33D) else Color.Transparent,
+                            RoundedCornerShape(10.dp),
+                        )
+                        .padding(horizontal = 8.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Txt(shiftLabel, size = 15.sp, color = if (timelineFocused) Amber else TextDim)
                     Spacer(Modifier.width(10.dp))
-                    ProgressBar(behindForBar, Modifier.weight(1f).height(8.dp))
+                    ProgressBar(behindForBar, Modifier.weight(1f).height(if (timelineFocused) 10.dp else 8.dp))
                     Spacer(Modifier.width(10.dp))
-                    Txt("эфир", size = 15.sp, color = TextDim)
+                    Txt("эфир", size = 15.sp, color = if (timelineFocused) Amber else TextDim)
                 }
                 Spacer(Modifier.height(16.dp))
                 Row(
@@ -745,10 +807,10 @@ fun PlayerScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    FocusItem(onClick = { seekBy(-SEEK_STEP_MS) }) { focused ->
-                        Txt("−10 с", size = 20.sp, weight = FontWeight.Bold, color = if (focused) OnAmber else TextMain)
+                    FocusItem(onClick = { seekBy(-SEEK_STEP_MS); touch++ }) { focused ->
+                        Txt("−5 с", size = 20.sp, weight = FontWeight.Bold, color = if (focused) OnAmber else TextMain)
                     }
-                    FocusItem(focusRequester = playFocus, onClick = { togglePause() }) { focused ->
+                    FocusItem(focusRequester = playFocus, onClick = { togglePause(); touch++ }) { focused ->
                         Txt(
                             if (paused) "▶  Продолжить" else "❚❚  Пауза",
                             size = 20.sp,
@@ -756,8 +818,8 @@ fun PlayerScreen(
                             color = if (focused) OnAmber else TextMain,
                         )
                     }
-                    FocusItem(onClick = { seekBy(SEEK_STEP_MS) }) { focused ->
-                        Txt("+10 с", size = 20.sp, weight = FontWeight.Bold, color = if (focused) OnAmber else TextMain)
+                    FocusItem(onClick = { seekBy(SEEK_STEP_MS); touch++ }) { focused ->
+                        Txt("+5 с", size = 20.sp, weight = FontWeight.Bold, color = if (focused) OnAmber else TextMain)
                     }
                     FocusItem(onClick = { goLive() }) { focused ->
                         Txt("В эфир", size = 20.sp, weight = FontWeight.Bold, color = if (focused) OnAmber else TextMain)
@@ -765,7 +827,11 @@ fun PlayerScreen(
                 }
                 Spacer(Modifier.height(10.dp))
                 Txt(
-                    "← → кнопки     OK — нажать     Назад — продолжить     лимит ${PlayerPrefs.hint(maxBufferSec)}",
+                    if (timelineFocused) {
+                        "← → перемотка ±5 с     ↓ кнопки     лимит ${PlayerPrefs.hint(maxBufferSec)}"
+                    } else {
+                        "↑ таймлайн     ← → кнопки     OK — нажать     (автоскрытие 5 с)"
+                    },
                     size = 15.sp,
                     color = TextDim,
                 )
