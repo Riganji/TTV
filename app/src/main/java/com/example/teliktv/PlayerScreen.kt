@@ -68,6 +68,16 @@ private enum class PlayerPanel { None, Channels, Groups, Streams, Epg, Settings 
 private const val MAX_LIVE_RETRIES = 3
 
 /**
+ * Ошибки разбора манифеста/контейнера — часто разовая случайность сети (оборванная или
+ * усечённая загрузка), а не действительно нерабочий поток. Прежде чем переключаться на
+ * следующий поток канала, один раз перезапрашиваем этот же.
+ */
+private val MANIFEST_RETRY_CODES = setOf(
+    PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+)
+
+/**
  * Управление пультом (панели закрыты):
  *  ↑ / ↓ (и CH+/CH−)  — предыдущий / следующий канал в текущей группе
  *  ←                  — список каналов (ещё раз ← — категории, включая «Избранное»)
@@ -138,6 +148,8 @@ fun PlayerScreen(
     var inBackground by remember { mutableStateOf(false) }   // Home / экран выключен
     var retried by remember { mutableStateOf(emptySet<String>()) }
     var liveRetries by remember { mutableIntStateOf(0) }   // подряд BEHIND_LIVE_WINDOW без выхода в READY
+    // slug -> индексы потоков, для которых уже была одна повторная попытка после malformed-ошибки.
+    val manifestRetried = remember { mutableStateMapOf<String, Set<Int>>() }
 
     // ---- действия
 
@@ -161,6 +173,7 @@ fun PlayerScreen(
             if (resetStream) {
                 chosen[s] = 0
                 failedStreams.remove(s)
+                manifestRetried.remove(s)
             }
             nonce++
         }
@@ -198,6 +211,7 @@ fun PlayerScreen(
                 if (state == Player.STATE_READY) {
                     error = null
                     failedStreams.remove(currentSlug)
+                    manifestRetried.remove(currentSlug)
                     retried = retried - currentSlug
                     liveRetries = 0
                 }
@@ -211,6 +225,19 @@ fun PlayerScreen(
                     exo.seekToDefaultPosition()
                     exo.prepare()
                     return
+                }
+                // Манифест/контейнер не разобрался — прежде чем считать поток нерабочим,
+                // пробуем скачать его ещё раз: часто это была усечённая загрузка, а не мёртвая ссылка.
+                if (e.errorCode in MANIFEST_RETRY_CODES) {
+                    val s = currentSlug
+                    val idx = chosen[s] ?: 0
+                    val done = manifestRetried[s] ?: emptySet()
+                    if (idx !in done) {
+                        manifestRetried[s] = done + idx
+                        notice = "поток не открылся с первого раза — пробую ещё раз"
+                        nonce++
+                        return
+                    }
                 }
                 onStreamFailed(e.errorCodeName)
             }
@@ -610,7 +637,11 @@ private fun buildSource(context: Context, s: StreamItem): MediaSource {
         .setAllowCrossProtocolRedirects(true)
         .setConnectTimeoutMs(15_000)
         .setReadTimeoutMs(15_000)
-        .setDefaultRequestProperties(mapOf("Referer" to s.referer))
+        // identity вместо gzip: DefaultHttpDataSource работает поверх HttpURLConnection,
+        // а тот при сжатом ответе иногда путает Content-Length и обрезает файл — плеер
+        // получает половину плейлиста и падает с PARSING_MANIFEST_MALFORMED. Плейлисты
+        // маленькие, разжимать их всё равно не нужно.
+        .setDefaultRequestProperties(mapOf("Referer" to s.referer, "Accept-Encoding" to "identity"))
     val mime = if (Extract.isDash(s.url)) MimeTypes.APPLICATION_MPD else MimeTypes.APPLICATION_M3U8
     val item = MediaItem.Builder().setUri(s.url).setMimeType(mime).build()
     return DefaultMediaSourceFactory(DefaultDataSource.Factory(context, http)).createMediaSource(item)
