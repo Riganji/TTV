@@ -16,7 +16,7 @@ keytool -genkeypair -v -keystore app.jks -alias teliktv -keyalg RSA -keysize 204
 Артефакт из Actions скачивается **zip-архивом** — ставить надо распакованный `app-release.apk`, сам архив Android считает повреждённым пакетом.
 - Тесты чистого ядра (парсер страниц, расписание, XMLTV, группы): `gradle :app:testDebugUnitTest`.
 
-Минимальный Android — 8.0 (API 26).
+Минимальный Android — 5.0 (API 21); java.time и Base64 на API 21–25 обеспечивает core library desugaring.
 
 ## Управление пультом
 **Список**

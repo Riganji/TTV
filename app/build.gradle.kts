@@ -13,10 +13,10 @@ android {
 
     defaultConfig {
         applicationId = "com.example.teliktv"
-        minSdk = 26            // java.util.Base64 (парсер) — с API 26
+        minSdk = 21            // Android TV начинается с API 21; java.time и java.util.Base64 (API 26) — через desugaring
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 4
+        versionName = "0.2.2"
     }
 
     /**
@@ -54,6 +54,7 @@ android {
         }
     }
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true   // java.time / Base64 / Map.putIfAbsent на API 21–25
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -83,6 +84,8 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 
     testImplementation("junit:junit:4.13.2")
 }

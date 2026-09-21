@@ -30,7 +30,7 @@ object EpgConfig {
         "lyubimoe-kino" to "lubimoe-kino",
         "tv-xxi" to "tvxxi",
         "hollywood" to "hollywood",
-        "trash-tv" to "trash",
+        "trash-tv" to "trashtv",
         "ostrosyuzhetnoe-hd" to "ostrosiuzhetnoe-hd",
         "sony-sci-fi" to "sony-scifi",
         "illyuzion" to "illuzion-plus",
@@ -50,9 +50,9 @@ object EpgConfig {
         // Cineman		
         "cineman-action" to "cineman-action",
         "cineman-katastrofy" to "cineman-katastrofy",
-        "cineman-komediya" to "cineman-komediya",
+        "cineman-komediya" to "cineman-comedy",
         "cineman-marvel" to "cineman-marvel",
-        "cineman-triller" to "cineman-triller",
+        "cineman-triller" to "cineman-thriller",
         "cineman-top" to "cineman-top",
 
         // Познавательные
