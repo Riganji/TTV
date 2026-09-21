@@ -85,8 +85,8 @@ private val MANIFEST_RETRY_CODES = setOf(
  *  ←                  — список каналов (ещё раз ← — категории, включая «Избранное»)
  *  →                  — телепрограмма; на паузе — возврат в прямой эфир
  *  Menu               — выбор потока
- *  OK                 — карточка «сейчас / далее»; на паузе — продолжить
- *  Пауза              — в настройках (шестерёнка) или Play/Pause на пульте
+ *  OK                 — карточка «сейчас / далее» + Пауза / Продолжить
+ *  Play/Pause         — пауза (если есть на пульте)
  *  Назад              — закрыть панель / выйти в список
  * Если поток не открылся или не стартует за Config.STREAM_TIMEOUT_MS — автоматически включается
  * следующий поток канала; когда исчерпаны все — один раз перепарсивается канал и всё повторяется.
@@ -440,9 +440,12 @@ fun PlayerScreen(
                     }
                     Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
                     Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
-                        // OK — карточка «сейчас / далее»; на паузе — продолжить.
-                        if (paused) togglePause() else detail = !detail
-                        true
+                        // OK — открыть карточку «сейчас / далее» (с кнопкой паузы).
+                        // Если карточка уже открыта — не перехватываем: OK уходит на FocusItem.
+                        if (detail) false else {
+                            detail = true
+                            true
+                        }
                     }
                     Key.MediaPlayPause -> { togglePause(); true }
                     Key.MediaPause -> {
@@ -509,8 +512,8 @@ fun PlayerScreen(
             )
         }
 
-        // Пауза (timeshift) — счётчик занятого кэша на диске
-        if (paused && panel == PlayerPanel.None && error == null) {
+        // Пауза (timeshift) — счётчик кэша; скрыта, если открыта карточка OK
+        if (paused && panel == PlayerPanel.None && !detail && error == null) {
             Column(
                 Modifier
                     .align(Alignment.Center)
@@ -555,8 +558,15 @@ fun PlayerScreen(
             }
         }
 
-        // Карточка «сейчас / далее» (OK)
+        // Карточка «сейчас / далее» (OK) + Пауза / Продолжить
         if (detail && panel == PlayerPanel.None && channel != null) {
+            val pauseFocus = remember { FocusRequester() }
+            LaunchedEffect(detail, paused) {
+                try {
+                    pauseFocus.requestFocus()
+                } catch (_: Exception) {
+                }
+            }
             Column(
                 Modifier
                     .align(Alignment.BottomCenter)
@@ -595,6 +605,41 @@ fun PlayerScreen(
                     Txt("Далее", size = 16.sp, color = Amber)
                     for (p in next) Txt("${Epg.time(p.start)}   ${p.title}", size = 18.sp, color = TextMain)
                 }
+                Spacer(Modifier.height(16.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    FocusItem(
+                        focusRequester = pauseFocus,
+                        onClick = { togglePause() },
+                    ) { focused ->
+                        Txt(
+                            if (paused) "Продолжить" else "Пауза",
+                            size = 20.sp,
+                            weight = FontWeight.Bold,
+                            color = if (focused) OnAmber else TextMain,
+                        )
+                    }
+                    if (paused) {
+                        FocusItem(onClick = { goLive() }) { focused ->
+                            Txt(
+                                "В эфир",
+                                size = 20.sp,
+                                weight = FontWeight.Bold,
+                                color = if (focused) OnAmber else TextMain,
+                            )
+                        }
+                        Txt(
+                            "кэш: $cacheUsedMb",
+                            size = 18.sp,
+                            color = TextDim,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Txt(
+                    if (paused) "OK — продолжить / в эфир     Назад — закрыть" else "OK — пауза     Назад — закрыть",
+                    size = 15.sp,
+                    color = TextDim,
+                )
             }
         }
 
