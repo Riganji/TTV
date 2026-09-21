@@ -265,6 +265,23 @@ fun PlayerScreen(
         return maxOf(disk, loaded, fromBuf, fromLive, pauseBaseBytes)
     }
 
+    /** В прямой эфир: seek на live edge + очистка дискового кэша. */
+    fun goLive() {
+        if (System.currentTimeMillis() < detailIgnoreOkUntil) return
+        paused = false
+        inTimeshift = false
+        timeshiftUi = false
+        timeshiftIoRetries = 0
+        StreamCache.clear()
+        loadedBytesRef.set(0L)
+        pauseBaseBytes = 0L
+        cacheUsedMb = "кэш: 0.0 МБ"
+        shiftLabel = "−0:00"
+        exo.seekToDefaultPosition()
+        exo.playWhenReady = true
+        notice = "прямой эфир"
+    }
+
     /** Пауза / продолжить. Вход в паузу включает timeshift и карточку плеера. */
     fun togglePause() {
         if (error != null || stream == null) return
@@ -339,22 +356,6 @@ fun PlayerScreen(
         shiftLabel = formatShift(if (off == C.TIME_UNSET || off < 0) (maxPos - target) else off)
     }
 
-    /** В прямой эфир: seek на live edge + очистка дискового кэша. */
-    fun goLive() {
-        if (System.currentTimeMillis() < detailIgnoreOkUntil) return
-        paused = false
-        inTimeshift = false
-        timeshiftUi = false
-        timeshiftIoRetries = 0
-        StreamCache.clear()
-        loadedBytesRef.set(0L)
-        pauseBaseBytes = 0L
-        cacheUsedMb = "кэш: 0.0 МБ"
-        shiftLabel = "−0:00"
-        exo.seekToDefaultPosition()
-        exo.playWhenReady = true
-        notice = "прямой эфир"
-    }
 
     /** Перепарсить канал; resetStream — вернуться на первый поток (когда перебрали все). */
     fun reload(s: String, resetStream: Boolean) {
