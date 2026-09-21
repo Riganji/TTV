@@ -32,12 +32,15 @@ data class Programme(
     val desc: String? = null,
 )
 
-/** Канал, который не удалось загрузить при обновлении. cached = в списке остался сохранённый вариант. */
+/**
+ * Канал, который не удалось загрузить при обновлении. Такой канал в список не попадает
+ * (нет разобранных ссылок — нечего смотреть), остаётся только в отчёте.
+ */
 data class ChannelFailure(
     val slug: String,
     val name: String,
     val reason: String,
-    val cached: Boolean,
+    val cached: Boolean = false,
 )
 
 data class EpgStatus(

@@ -29,6 +29,7 @@ private fun App(vm: MainViewModel = viewModel()) {
     val favorites by vm.favorites.collectAsState()
     val epg by vm.epg.collectAsState()
     val epgStatus by vm.epgStatus.collectAsState()
+    val update by vm.update.collectAsState()
 
     // Есть избранное — открываемся на нём, иначе на «Все каналы».
     var groupIndex by rememberSaveable {
@@ -46,6 +47,7 @@ private fun App(vm: MainViewModel = viewModel()) {
             epgStatus = epgStatus,
             status = status,
             failures = failures,
+            update = update,
             groupIndex = groupIndex,
             onGroupChange = { groupIndex = it },
             lastPlayed = lastPlayed,
@@ -55,16 +57,25 @@ private fun App(vm: MainViewModel = viewModel()) {
             },
             onToggleFavorite = { vm.toggleFavorite(it) },
             onRefresh = { vm.refresh() },
+            onRefreshEpg = { vm.refreshEpgOnly() },
+            onUpdate = { vm.onUpdateClick() },
         )
     } else {
         PlayerScreen(
             channels = channels,
             favorites = favorites,
             epg = epg,
+            epgStatus = epgStatus,
+            status = status,
+            failures = failures,
+            update = update,
             startGroup = s.group,
             startSlug = s.start,
             reloadChannel = { vm.reloadChannel(it) },
             onToggleFavorite = { vm.toggleFavorite(it) },
+            onRefresh = { vm.refresh() },
+            onRefreshEpg = { vm.refreshEpgOnly() },
+            onUpdate = { vm.onUpdateClick() },
             onCurrent = { slug, group ->
                 lastPlayed = slug
                 groupIndex = group     // вернёмся в список на той же группе, откуда смотрели

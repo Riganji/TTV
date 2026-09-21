@@ -25,6 +25,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -37,27 +42,42 @@ fun ChannelListScreen(
     epgStatus: EpgStatus,
     status: LoadStatus,
     failures: List<ChannelFailure>,
+    update: UpdateState,
     groupIndex: Int,
     onGroupChange: (Int) -> Unit,
     lastPlayed: String?,
     onPlay: (slug: String, group: Int) -> Unit,
     onToggleFavorite: (String) -> Unit,
     onRefresh: () -> Unit,
+    onRefreshEpg: () -> Unit,
+    onUpdate: () -> Unit,
 ) {
     val now = rememberNow()
     val group = groupIndex.coerceIn(0, Groups.names.size - 1)
     val visible = remember(channels, favorites, group) { Groups.channelsFor(group, channels, favorites) }
     var showReport by remember { mutableStateOf(false) }
-    BackHandler(enabled = showReport) { showReport = false }
+    var showSettings by remember { mutableStateOf(false) }
+    BackHandler(enabled = showReport || showSettings) {
+        if (showReport) showReport = false else showSettings = false
+    }
 
-    Box(Modifier.fillMaxSize()) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            // Menu на пульте открывает и закрывает настройки из любого места списка.
+            .onPreviewKeyEvent { ev ->
+                if (ev.type != KeyEventType.KeyDown || ev.key != Key.Menu) return@onPreviewKeyEvent false
+                if (showReport) showReport = false else showSettings = !showSettings
+                true
+            },
+    ) {
         Row(
             Modifier
                 .fillMaxSize()
                 .background(Ink)
                 .padding(horizontal = 48.dp, vertical = 32.dp),
         ) {
-            // ---- левая колонка: группы, обновление, статус телепрограммы
+            // ---- левая колонка: группы каналов и вход в меню настроек
             Column(Modifier.width(300.dp).fillMaxHeight()) {
                 Txt("Эфир", size = 34.sp, weight = FontWeight.Bold)
                 Spacer(Modifier.height(20.dp))
@@ -76,22 +96,38 @@ fun ChannelListScreen(
                             )
                         }
                     }
+                    // Обновление, телепрограмма и отчёт живут в отдельном меню (Menu на пульте).
                     item {
                         Column {
                             Spacer(Modifier.height(16.dp))
-                            FocusItem(modifier = Modifier.fillMaxWidth(), onClick = onRefresh) { focused ->
-                                val label =
-                                    if (status.loading) "Обновляю ${status.done} из ${status.total}" else "Обновить всё"
-                                Txt(label, color = if (focused) OnAmber else TextDim)
-                            }
-                            FocusItem(modifier = Modifier.fillMaxWidth(), onClick = { showReport = true }) { focused ->
-                                val (text, color) = when {
-                                    epgStatus.loading -> "Телепрограмма: загружается…" to TextDim
-                                    epgStatus.error != null -> "Телепрограмма: ошибка — подробнее" to ErrorRed
-                                    epg.updatedAt == 0L -> "Телепрограмма: нет данных" to TextDim
-                                    else -> "Телепрограмма: ${epgStatus.matched} из ${epgStatus.total}" to TextDim
+                            FocusItem(
+                                modifier = Modifier.fillMaxWidth(),
+                                onClick = { showSettings = true },
+                            ) { focused ->
+                                GearIcon(if (focused) OnAmber else TextDim)
+                                Spacer(Modifier.width(12.dp))
+                                Txt(
+                                    "Настройки",
+                                    Modifier.weight(1f),
+                                    color = if (focused) OnAmber else TextDim,
+                                )
+                                when {
+                                    status.loading -> Txt(
+                                        "${status.done}/${status.total}",
+                                        size = 16.sp,
+                                        color = if (focused) OnAmber else TextDim,
+                                    )
+                                    epgStatus.loading -> Txt(
+                                        "ТВ-программа…",
+                                        size = 16.sp,
+                                        color = if (focused) OnAmber else TextDim,
+                                    )
+                                    update.available != null -> Txt(
+                                        "обновление",
+                                        size = 16.sp,
+                                        color = if (focused) OnAmber else Amber,
+                                    )
                                 }
-                                Txt(text, color = if (focused) OnAmber else color, size = 17.sp, maxLines = 2)
                             }
                         }
                     }
@@ -120,7 +156,7 @@ fun ChannelListScreen(
                             group == Groups.FAVORITES ->
                                 "В избранном пусто. В любой группе перейдите со строки канала вправо на звёздочку и нажмите OK."
                             status.loading -> "Загружаю каналы…"
-                            else -> "Каналов нет. Выберите «Обновить всё»."
+                            else -> "Каналов нет. Нажмите Menu и выберите «Обновить каналы»."
                         },
                         color = TextDim,
                         size = 22.sp,
@@ -139,6 +175,27 @@ fun ChannelListScreen(
                     )
                 }
             }
+        }
+
+        if (showSettings && !showReport) {
+            SettingsPanel(
+                status = status,
+                epg = epg,
+                epgStatus = epgStatus,
+                failures = failures,
+                update = update,
+                onRefreshChannels = {
+                    showSettings = false
+                    onRefresh()
+                },
+                onRefreshEpg = {
+                    showSettings = false
+                    onRefreshEpg()
+                },
+                onShowReport = { showReport = true },
+                // Панель не закрываем: прогресс загрузки обновления виден прямо в пункте меню.
+                onUpdate = onUpdate,
+            )
         }
 
         if (showReport) {

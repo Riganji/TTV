@@ -155,10 +155,70 @@ object Extract {
     fun findTabLabels(html: String): List<String> {
         val labels = ArrayList<String>()
         TAB_RE.findAll(html).forEach { m ->
-            val label = TAG_RE.replace(m.groupValues[1], "").trim()
+            val label = cleanLabel(m.groupValues[1])
             labels.add(label.ifEmpty { "Поток ${labels.size + 1}" })
         }
         return labels
+    }
+
+    // ---------------------------------------------------------------- названия потоков
+
+    private val LABEL_TRIM_CHARS = charArrayOf('«', '»', '"', '\'', '|', '·', '•', ':', ';', ',', '.', '-', '–', '—', ' ')
+
+    /**
+     * Хвостовой номер вместе с отделяющими его знаками: «Плеер 1», «Плеер №2», «Плеер - 3».
+     * Разделитель обязателен, иначе номер отрезался бы и от слитных названий вроде «Авто24».
+     */
+    private val LABEL_NUM_TAIL_RE = Regex("""[\s\-–—:.,#№()\[\]]+\d+\s*[)\]]?\s*$""")
+
+    /** Текст ярлыка без тегов, лишних пробелов и обрамляющей пунктуации. */
+    fun cleanLabel(raw: String): String =
+        WS_RE.replace(TAG_RE.replace(raw, " "), " ").trim().trim(*LABEL_TRIM_CHARS).let { WS_RE.replace(it, " ").trim() }
+
+    /**
+     * Основа названия — без номера в конце: «Плеер 2» -> «Плеер».
+     * Нумерацию потом расставляет [uniqueLabels] один раз, без «Плеер 2 3».
+     */
+    fun labelBase(raw: String): String {
+        val t = cleanLabel(raw)
+        // Номеров в хвосте может быть несколько — «Плеер 1 2» из кэша прошлых версий.
+        var stripped = t
+        var guard = 0
+        while (guard++ < 3) {
+            val next = LABEL_NUM_TAIL_RE.replace(stripped, "").trim(*LABEL_TRIM_CHARS).trim()
+            if (next.isEmpty() || next == stripped) break
+            stripped = next
+        }
+        return stripped.ifEmpty { t }
+    }
+
+    /**
+     * Единственная нумерация в названиях: уникальная основа остаётся как есть,
+     * повторяющаяся получает номер по порядку — 1..n.
+     *
+     * Если основа сама заканчивается цифрой (часовой пояс «+2», «Дубль 2»), номер берётся
+     * в скобки: «+2 (1)», а не «+2 1» — иначе на экране это читается как «+21».
+     */
+    fun uniqueLabels(bases: List<String>): List<String> {
+        val names = bases.map { it.ifEmpty { "Поток" } }
+        val counts = names.groupingBy { it }.eachCount()
+        val seen = HashMap<String, Int>()
+        return names.map { n ->
+            if ((counts[n] ?: 0) <= 1) {
+                n
+            } else {
+                val i = (seen[n] ?: 0) + 1
+                seen[n] = i
+                if (n.lastOrNull()?.isDigit() == true) "$n ($i)" else "$n $i"
+            }
+        }
+    }
+
+    /** Приводит названия уже сохранённых потоков к тому же виду (кэш от прошлых версий). */
+    fun cleanStreams(streams: List<StreamItem>): List<StreamItem> {
+        if (streams.isEmpty()) return streams
+        val labels = uniqueLabels(streams.map { labelBase(it.label) })
+        return streams.mapIndexed { i, s -> if (s.label == labels[i]) s else s.copy(label = labels[i]) }
     }
 
     fun channelTitle(html: String, fallback: String): String {

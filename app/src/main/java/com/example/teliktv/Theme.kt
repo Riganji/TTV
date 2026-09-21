@@ -28,6 +28,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -80,6 +81,8 @@ fun Txt(
 fun FocusItem(
     modifier: Modifier = Modifier,
     selected: Boolean = false,
+    /** Прижать содержимое к верху — для строк, которые растут по высоте (описание передачи). */
+    alignTop: Boolean = false,
     focusRequester: FocusRequester? = null,
     onFocused: () -> Unit = {},
     onFocusChange: (Boolean) -> Unit = {},
@@ -108,7 +111,7 @@ fun FocusItem(
             )
             .background(bg)
             .padding(horizontal = 16.dp, vertical = 11.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalAlignment = if (alignTop) Alignment.Top else Alignment.CenterVertically,
     ) {
         content(focused)
     }
@@ -131,6 +134,27 @@ fun StarIcon(filled: Boolean, color: Color, iconSize: Dp = 22.dp) {
         }
         path.close()
         if (filled) drawPath(path, color) else drawPath(path, color, style = Stroke(width = 2.dp.toPx()))
+    }
+}
+
+/** «Шестерёнка» настроек, нарисованная вручную — как и звезда, не зависит от шрифтов ТВ. */
+@Composable
+fun GearIcon(color: Color, iconSize: Dp = 22.dp, teeth: Int = 8) {
+    Canvas(Modifier.size(iconSize)) {
+        val cx = this.size.width / 2f
+        val cy = this.size.height / 2f
+        val r = this.size.minDimension / 2f
+        val ring = r * 0.60f
+        val stroke = Stroke(width = r * 0.30f)
+        drawCircle(color, radius = ring, center = Offset(cx, cy), style = stroke)
+        for (i in 0 until teeth) {
+            val a = i * 2.0 * Math.PI / teeth
+            val sx = cx + (ring * 0.95f * cos(a)).toFloat()
+            val sy = cy + (ring * 0.95f * sin(a)).toFloat()
+            val ex = cx + (r * cos(a)).toFloat()
+            val ey = cy + (r * sin(a)).toFloat()
+            drawLine(color, Offset(sx, sy), Offset(ex, ey), strokeWidth = r * 0.26f)
+        }
     }
 }
 

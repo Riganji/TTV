@@ -62,7 +62,10 @@ import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private enum class PlayerPanel { None, Channels, Groups, Streams, Epg }
+private enum class PlayerPanel { None, Channels, Groups, Streams, Epg, Settings }
+
+/** Сколько раз подряд пробуем вернуться на «живую» позицию после BEHIND_LIVE_WINDOW, прежде чем считать поток нерабочим. */
+private const val MAX_LIVE_RETRIES = 3
 
 /**
  * Управление пультом (панели закрыты):
@@ -81,10 +84,17 @@ fun PlayerScreen(
     channels: List<Channel>,
     favorites: Set<String>,
     epg: EpgData,
+    epgStatus: EpgStatus,
+    status: LoadStatus,
+    failures: List<ChannelFailure>,
+    update: UpdateState,
     startGroup: Int,
     startSlug: String,
     reloadChannel: suspend (String) -> Unit,
     onToggleFavorite: (String) -> Unit,
+    onRefresh: () -> Unit,
+    onRefreshEpg: () -> Unit,
+    onUpdate: () -> Unit,
     onCurrent: (slug: String, group: Int) -> Unit,
     onExit: () -> Unit,
 ) {
@@ -116,6 +126,7 @@ fun PlayerScreen(
     val nowProg = Epg.current(programmes, now)
 
     var panel by remember { mutableStateOf(PlayerPanel.None) }
+    var showReport by remember { mutableStateOf(false) }
     var panelGroup by remember { mutableIntStateOf(startGroup) }
     var touch by remember { mutableIntStateOf(0) }
     var brief by remember { mutableStateOf(true) }
@@ -126,6 +137,7 @@ fun PlayerScreen(
     var nonce by remember { mutableIntStateOf(0) }
     var inBackground by remember { mutableStateOf(false) }   // Home / экран выключен
     var retried by remember { mutableStateOf(emptySet<String>()) }
+    var liveRetries by remember { mutableIntStateOf(0) }   // подряд BEHIND_LIVE_WINDOW без выхода в READY
 
     // ---- действия
 
@@ -187,10 +199,19 @@ fun PlayerScreen(
                     error = null
                     failedStreams.remove(currentSlug)
                     retried = retried - currentSlug
+                    liveRetries = 0
                 }
             }
 
             override fun onPlayerError(e: PlaybackException) {
+                // Отстали от окна прямого эфира (пауза, буферизация, просадка сети): поток жив,
+                // достаточно вернуться на «живую» позицию — переключать поток не нужно.
+                if (e.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW && liveRetries < MAX_LIVE_RETRIES) {
+                    liveRetries++
+                    exo.seekToDefaultPosition()
+                    exo.prepare()
+                    return
+                }
                 onStreamFailed(e.errorCodeName)
             }
         }
@@ -250,6 +271,9 @@ fun PlayerScreen(
         }
     }
     // Любой оверлей закрывается сам через Config.OVERLAY_TIMEOUT_MS без нажатий (touch сбрасывает отсчёт).
+    LaunchedEffect(panel) {
+        if (panel != PlayerPanel.Settings) showReport = false
+    }
     LaunchedEffect(panel, touch) {
         if (panel == PlayerPanel.None) return@LaunchedEffect
         delay(Config.OVERLAY_TIMEOUT_MS)
@@ -269,6 +293,8 @@ fun PlayerScreen(
     }
     BackHandler {
         when {
+            showReport -> showReport = false
+            panel == PlayerPanel.Settings -> panel = PlayerPanel.Groups
             panel == PlayerPanel.Groups -> panel = PlayerPanel.Channels
             panel != PlayerPanel.None -> panel = PlayerPanel.None
             detail -> detail = false
@@ -430,6 +456,7 @@ fun PlayerScreen(
                 },
                 onToggleFavorite = onToggleFavorite,
                 onShowGroups = { panel = PlayerPanel.Groups },
+                onSettings = { panel = PlayerPanel.Settings },
                 onActivity = { touch++ },
                 modifier = Modifier.align(Alignment.CenterStart),
             )
@@ -459,6 +486,45 @@ fun PlayerScreen(
                     onActivity = { touch++ },
                     modifier = Modifier.align(Alignment.CenterEnd),
                 )
+            }
+        }
+
+        // Меню настроек («шестерёнка» в оверлее категорий)
+        if (panel == PlayerPanel.Settings) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .onPreviewKeyEvent { ev ->
+                        if (ev.type == KeyEventType.KeyDown) touch++
+                        false
+                    },
+            ) {
+                if (showReport) {
+                    val missing = if (epg.updatedAt > 0) {
+                        channels.filter { epg.bySlug[it.slug].isNullOrEmpty() }.map { it.title }
+                    } else {
+                        emptyList()
+                    }
+                    ReportOverlay(failures, epgStatus, missing) { showReport = false }
+                } else {
+                    SettingsPanel(
+                        status = status,
+                        epg = epg,
+                        epgStatus = epgStatus,
+                        failures = failures,
+                        update = update,
+                        onRefreshChannels = {
+                            panel = PlayerPanel.None
+                            onRefresh()
+                        },
+                        onRefreshEpg = {
+                            panel = PlayerPanel.None
+                            onRefreshEpg()
+                        },
+                        onShowReport = { showReport = true },
+                        onUpdate = onUpdate,
+                    )
+                }
             }
         }
 

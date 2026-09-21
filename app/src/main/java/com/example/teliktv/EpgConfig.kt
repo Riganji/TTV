@@ -75,5 +75,6 @@ object EpgConfig {
         "ren-tv" to "rentv",
         "pyatyj-kanal" to "5kanal-ru",
         "rossiya-24" to "rossia-24",
+        "rbk" to "rbk",
     )
 }

@@ -1,0 +1,98 @@
+name: Release APK
+
+# Релиз — источник обновлений для приложения: Updater.kt читает
+# api.github.com/repos/Riganji/TTV/releases/latest и качает приложенный APK.
+# Тег обязан совпадать с versionName из app/build.gradle.kts: v0.3.0 -> 0.3.0.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Тег релиза, например v0.3.0 (берётся versionName из сборки, если пусто)'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      # Тот же ключ, что и в build.yml: обновление поверх встанет только при одинаковой подписи.
+      - name: Подготовить keystore
+        run: |
+          if [ -f teliktv.jks ]; then
+            cp teliktv.jks "$RUNNER_TEMP/app.jks"
+          elif [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/app.jks"
+          else
+            echo "::error::Нет ни teliktv.jks, ни секрета KEYSTORE_BASE64 — релиз без постоянного ключа бесполезен."
+            exit 1
+          fi
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/app.jks" >> $GITHUB_ENV
+          echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD || 'teliktv' }}" >> $GITHUB_ENV
+          echo "KEY_ALIAS=${{ secrets.KEY_ALIAS || 'teliktv' }}" >> $GITHUB_ENV
+          echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD || 'teliktv' }}" >> $GITHUB_ENV
+
+      # Приложение будет ходить за обновлением именно в UPDATE_REPO (по умолчанию — этот же).
+      # Приватный репозиторий требует секрет UPDATE_TOKEN (fine-grained PAT, contents: read).
+      - name: Собрать release APK
+        env:
+          UPDATE_REPO: ${{ vars.UPDATE_REPO }}
+          UPDATE_TOKEN: ${{ secrets.UPDATE_TOKEN }}
+        run: gradle :app:assembleRelease
+
+      - name: Версия и тег
+        id: v
+        run: |
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          APK=app/build/outputs/apk/release/app-release.apk
+          "$BT/apksigner" verify --print-certs "$APK"
+          VERSION=$("$BT/aapt2" dump badging "$APK" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+          TAG="${{ github.event.inputs.tag }}"
+          [ -n "$TAG" ] || TAG="${GITHUB_REF#refs/tags/}"
+          case "$TAG" in refs/*|"") TAG="v$VERSION";; esac
+          # Тег без «v» обязан совпасть с versionName, иначе приложение не увидит обновление.
+          if [ "${TAG#v}" != "$VERSION" ]; then
+            echo "::error::Тег $TAG не совпадает с versionName $VERSION — поправьте app/build.gradle.kts или тег."
+            exit 1
+          fi
+          OUT="TelikTV-$VERSION.apk"
+          cp "$APK" "$OUT"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "apk=$OUT" >> $GITHUB_OUTPUT
+
+      # Релиз кладётся туда, откуда приложение его ждёт. Если исходники приватные, а
+      # обновление хочется раздавать без токена в APK — заведите отдельный публичный
+      # репозиторий, укажите его в переменных UPDATE_REPO и RELEASE_REPO и дайте секрет
+      # RELEASE_TOKEN с правом создавать релизы в нём.
+      - name: Опубликовать релиз
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+        run: |
+          TAG="${{ steps.v.outputs.tag }}"
+          REPO="${{ vars.RELEASE_REPO }}"
+          [ -n "$REPO" ] || REPO="$GITHUB_REPOSITORY"
+          APK="${{ steps.v.outputs.apk }}"
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" --repo "$REPO" --clobber
+          else
+            gh release create "$TAG" "$APK" --repo "$REPO" \
+              --title "TelikTV ${{ steps.v.outputs.version }}" \
+              --generate-notes \
+              || gh release create "$TAG" "$APK" --repo "$REPO" \
+                   --title "TelikTV ${{ steps.v.outputs.version }}" \
+                   --notes "TelikTV ${{ steps.v.outputs.version }}"
+          fi

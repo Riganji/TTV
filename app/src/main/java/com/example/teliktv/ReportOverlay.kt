@@ -40,7 +40,8 @@ fun ReportOverlay(
             } else {
                 add(ReportLine("Не загрузились каналы (${failures.size})", ErrorRed, heading = true))
                 for (f in failures) {
-                    val tail = if (f.cached) " — показан сохранённый вариант" else ""
+                    // Канал без разобранных ссылок в список не попадает — об этом и говорим.
+                    val tail = if (f.cached) " — показан сохранённый вариант" else " — скрыт из списка"
                     add(ReportLine("${f.name} (${f.slug}): ${f.reason}$tail"))
                 }
             }

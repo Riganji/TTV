@@ -143,10 +143,12 @@ class TelikScraper {
         val labels = Extract.findTabLabels(html)
         if (players.isEmpty()) throw ScrapeException("на странице не найден плеер")
 
-        val streams = LinkedHashMap<String, StreamItem>()
+        // Сначала собираем ссылки с «основой» названия (без номера), нумерацию расставляем один раз
+        // в конце — иначе получается «Плеер 2 3» с двумя номерами подряд.
+        val found = LinkedHashMap<String, Pair<String, String>>()   // url -> (player, основа названия)
         val playerErrors = ArrayList<String>()
         players.forEachIndexed { i, player ->
-            val base = if (labels.size == players.size) labels[i] else "Поток ${i + 1}"
+            val base = Extract.labelBase(if (labels.size == players.size) labels[i] else "Поток")
             val urls = try {
                 resolvePlayer(player, url)
             } catch (e: IOException) {
@@ -154,12 +156,12 @@ class TelikScraper {
                 playerErrors.add(describe(e))
                 return@forEachIndexed
             }
-            urls.forEachIndexed { j, s ->
-                if (s !in streams) {
-                    val label = if (urls.size > 1) "$base ${j + 1}" else base
-                    streams[s] = StreamItem(label = label, player = player, url = s)
-                }
-            }
+            for (s in urls) if (s !in found) found[s] = player to base
+        }
+        val entries = found.entries.toList()
+        val finalLabels = Extract.uniqueLabels(entries.map { it.value.second })
+        val streams = entries.mapIndexed { i, e ->
+            StreamItem(label = finalLabels[i], player = e.value.first, url = e.key)
         }
         if (streams.isEmpty()) {
             throw ScrapeException(
@@ -174,7 +176,7 @@ class TelikScraper {
             slug = slug,
             title = title,
             page = url,
-            streams = streams.values.toList(),
+            streams = streams,
             logo = Extract.findLogo(html, url, slug, title),
         )
     }

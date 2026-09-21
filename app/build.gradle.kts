@@ -7,6 +7,39 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+/**
+ * Настройки обновления, зашиваемые в BuildConfig.
+ *
+ * UPDATE_REPO  — откуда приложение берёт релизы (owner/repo).
+ * UPDATE_TOKEN — токен чтения; нужен, только если этот репозиторий приватный.
+ *
+ * Берутся из local.properties (updateRepo= / updateToken=) или из переменных окружения
+ * UPDATE_REPO / UPDATE_TOKEN (секреты GitHub Actions). В git токен не попадает.
+ */
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+
+fun setting(key: String, env: String, default: String): String =
+    listOfNotNull(localProps.getProperty(key), System.getenv(env))
+        .map { it.trim() }
+        .firstOrNull { it.isNotEmpty() }
+        ?: default
+
+/**
+ * Прячет токен от «strings app.apk»: XOR с постоянным ключом и hex.
+ * Это замедляет любопытных, но не защищает — кто угодно с APK может достать токен,
+ * поэтому у токена должны быть права только на чтение одного репозитория.
+ */
+fun hideToken(token: String): String {
+    if (token.isEmpty()) return ""
+    val key = "teliktv".toByteArray(Charsets.UTF_8)
+    return token.toByteArray(Charsets.UTF_8)
+        .mapIndexed { i, b -> (b.toInt() xor key[i % key.size].toInt()) and 0xFF }
+        .joinToString("") { "%02x".format(it) }
+}
+
 android {
     namespace = "com.example.teliktv"
     compileSdk = 35
@@ -15,8 +48,13 @@ android {
         applicationId = "com.example.teliktv"
         minSdk = 21            // Android TV начинается с API 21; java.time и java.util.Base64 (API 26) — через desugaring
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.2.2"
+        // versionName сравнивается с тегом релиза на GitHub (см. Updater.kt),
+        // поэтому тег релиза должен быть «v<versionName>», например v0.3.0.
+        versionCode = 6
+        versionName = "0.3.0"
+
+        buildConfigField("String", "UPDATE_REPO", "\"${setting("updateRepo", "UPDATE_REPO", "Riganji/TTV")}\"")
+        buildConfigField("String", "UPDATE_TOKEN", "\"${hideToken(setting("updateToken", "UPDATE_TOKEN", ""))}\"")
     }
 
     /**
@@ -63,6 +101,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true   // BuildConfig.VERSION_NAME нужен проверке обновлений
     }
 }
 

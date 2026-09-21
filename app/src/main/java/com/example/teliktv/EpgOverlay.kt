@@ -108,6 +108,7 @@ fun EpgOverlay(
                     FocusItem(
                         modifier = Modifier.fillMaxWidth(),
                         selected = isNow,
+                        alignTop = true,
                         focusRequester = if (i == currentIndex) focus else null,
                         onClick = { },
                     ) { focused ->
@@ -118,7 +119,7 @@ fun EpgOverlay(
                             color = if (focused) OnAmber else if (isNow) Amber else TextDim,
                             weight = if (isNow) FontWeight.Bold else null,
                         )
-                        Column(Modifier.fillMaxWidth()) {
+                        Column(Modifier.weight(1f)) {
                             Txt(
                                 p.title,
                                 size = 19.sp,
@@ -133,9 +134,10 @@ fun EpgOverlay(
                                 Spacer(Modifier.height(5.dp))
                                 ProgressBar(Epg.progress(p, now), Modifier.fillMaxWidth())
                             }
+                            // Описание — целиком: строка растёт по высоте, текст не обрезается.
                             if (focused && p.desc != null) {
                                 Spacer(Modifier.height(4.dp))
-                                Txt(p.desc, size = 15.sp, color = OnAmber, maxLines = 3)
+                                Txt(p.desc, size = 15.sp, color = OnAmber, maxLines = Int.MAX_VALUE)
                             }
                         }
                     }

@@ -34,10 +34,48 @@ object Config {
             "history-channel", "history-2", "national-geographic", "discovery-channel",
             "viasat-history", "nat-geo-wild", "id-investigation-discovery", "muzhskoj", "avto24",
         ),
-        "Другое" to listOf("pervyj-kanal", "rossiya-1", "ntv", "ren-tv", "pyatyj-kanal", "rossiya-24"),
+        "Другое" to listOf(
+            "pervyj-kanal", "rossiya-1", "ntv", "ren-tv", "pyatyj-kanal", "rossiya-24", "rbk",
+        ),
     )
 
     val ALL_SLUGS: List<String> = GROUPS.flatMap { it.second }
+
+    // ------------------------------------------------------- каналы с постоянной ссылкой
+
+    /**
+     * Канал с прямой ссылкой на поток: telik.live для него не разбирается.
+     * slug используется и как ключ иконки/телепрограммы (см. EpgConfig.CHANNEL_MAP).
+     */
+    data class FixedChannel(
+        val slug: String,
+        val title: String,
+        val url: String,
+        val label: String = "Прямой эфир",
+    )
+
+    val FIXED: List<FixedChannel> = listOf(
+        FixedChannel(
+            slug = "rbk",
+            title = "РБК",
+            url = "https://online-video.rbc.ru/online2/rbctv.m3u8",
+        ),
+    )
+
+    /** Готовые Channel для FIXED — подставляются в список без обращения к сети. */
+    val FIXED_CHANNELS: List<Channel> = FIXED.map { f ->
+        Channel(
+            slug = f.slug,
+            title = f.title,
+            page = f.url,
+            streams = listOf(StreamItem(label = f.label, player = f.url, url = f.url)),
+        )
+    }
+
+    val FIXED_SLUGS: Set<String> = FIXED.map { it.slug }.toSet()
+
+    /** Что реально идёт в парсер: всё, кроме каналов с постоянной ссылкой. */
+    val SCRAPE_SLUGS: List<String> = ALL_SLUGS.filterNot { it in FIXED_SLUGS }
 
     // ------------------------------------------------------------------ EPG
 

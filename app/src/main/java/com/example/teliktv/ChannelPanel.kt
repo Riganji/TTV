@@ -35,7 +35,8 @@ import androidx.compose.ui.unit.sp
 /**
  * Оверлей слева поверх видео.
  *  showGroups = false: только каналы выбранной группы; ещё раз «влево» -> onShowGroups().
- *  showGroups = true: слева колонка категорий (фокус там), справа каналы выбранной категории.
+ *  showGroups = true: слева колонка категорий (фокус там), справа каналы выбранной категории;
+ *  под категориями — «шестерёнка»: меню настроек (onSettings).
  * Выбор канала -> onPick. Звезда справа от строки — избранное.
  */
 @Composable
@@ -51,6 +52,7 @@ fun ChannelPanel(
     onPick: (Channel) -> Unit,
     onToggleFavorite: (String) -> Unit,
     onShowGroups: () -> Unit,
+    onSettings: () -> Unit,
     onActivity: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -119,6 +121,21 @@ fun ChannelPanel(
                                 size = 16.sp,
                                 color = if (focused) OnAmber else TextDim,
                             )
+                        }
+                    }
+                    item {
+                        Column {
+                            Spacer(Modifier.height(12.dp))
+                            FocusItem(modifier = Modifier.fillMaxWidth(), onClick = onSettings) { focused ->
+                                GearIcon(if (focused) OnAmber else TextDim, iconSize = 20.dp)
+                                Spacer(Modifier.width(10.dp))
+                                Txt(
+                                    "Настройки",
+                                    Modifier.weight(1f),
+                                    size = 18.sp,
+                                    color = if (focused) OnAmber else TextDim,
+                                )
+                            }
                         }
                     }
                 }

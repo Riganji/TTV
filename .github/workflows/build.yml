@@ -17,28 +17,35 @@ jobs:
           gradle-version: 8.9
 
       # Постоянный ключ подписи: без него каждый прогон подписывает APK новым
-      # ключом и установка поверх старой версии не проходит.
-      # Секреты: KEYSTORE_BASE64 (base64 от .jks), KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD.
-      # Если секретов нет — создаётся ключ по умолчанию (только для первой установки).
+      # ключом и установка поверх старой версии (в том числе через встроенное
+      # обновление) не проходит.
+      # Ключ берётся из teliktv.jks в репозитории; если его нет — из секрета
+      # KEYSTORE_BASE64; если нет и его — создаётся временный (только для первой установки).
+      # Пароли: секреты KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD.
       - name: Подготовить keystore
         run: |
-          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+          if [ -f teliktv.jks ]; then
+            cp teliktv.jks "$RUNNER_TEMP/app.jks"
+          elif [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
             echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/app.jks"
-            echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
-            echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
-            echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
           else
             keytool -genkeypair -v -keystore "$RUNNER_TEMP/app.jks" \
               -alias teliktv -keyalg RSA -keysize 2048 -validity 10000 \
               -storepass teliktv -keypass teliktv -dname "CN=TelikTV, O=TelikTV, C=RU"
-            echo "::warning::KEYSTORE_BASE64 не задан — APK подписан временным ключом, обновление поверх не встанет."
-            echo "KEYSTORE_PASSWORD=teliktv" >> $GITHUB_ENV
-            echo "KEY_ALIAS=teliktv" >> $GITHUB_ENV
-            echo "KEY_PASSWORD=teliktv" >> $GITHUB_ENV
+            echo "::warning::Нет ни teliktv.jks, ни KEYSTORE_BASE64 — APK подписан временным ключом, обновление поверх не встанет."
           fi
           echo "KEYSTORE_FILE=$RUNNER_TEMP/app.jks" >> $GITHUB_ENV
+          echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD || 'teliktv' }}" >> $GITHUB_ENV
+          echo "KEY_ALIAS=${{ secrets.KEY_ALIAS || 'teliktv' }}" >> $GITHUB_ENV
+          echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD || 'teliktv' }}" >> $GITHUB_ENV
 
-      - run: gradle :app:assembleRelease
+      # UPDATE_REPO/UPDATE_TOKEN зашиваются в BuildConfig: токен нужен, только если
+      # репозиторий с релизами приватный (переменная UPDATE_REPO, секрет UPDATE_TOKEN).
+      - name: Собрать release APK
+        env:
+          UPDATE_REPO: ${{ vars.UPDATE_REPO }}
+          UPDATE_TOKEN: ${{ secrets.UPDATE_TOKEN }}
+        run: gradle :app:assembleRelease
 
       - name: Проверить, что APK подписан и читается
         run: |
