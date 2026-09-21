@@ -379,9 +379,9 @@ fun PlayerScreen(
         }
     }
 
-    // Счётчик кэша: скачанные байты / диск / буфер плеера.
-    LaunchedEffect(paused, detail) {
-        if (!paused && !detail) return@LaunchedEffect
+    // Счётчик кэша только во время timeshift (пауза), не во время обычного эфира.
+    LaunchedEffect(paused) {
+        if (!paused) return@LaunchedEffect
         while (true) {
             val disk = StreamCache.usedBytes(context)
             val loaded = loadedBytesRef.get()
@@ -672,8 +672,8 @@ fun PlayerScreen(
                                 color = if (focused) OnAmber else TextMain,
                             )
                         }
+                        Txt("кэш: $cacheUsedMb", size = 18.sp, color = TextDim)
                     }
-                    Txt("кэш: $cacheUsedMb", size = 18.sp, color = TextDim)
                 }
                 Spacer(Modifier.height(8.dp))
                 Txt(
