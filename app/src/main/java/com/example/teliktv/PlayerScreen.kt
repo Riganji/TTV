@@ -163,9 +163,11 @@ fun PlayerScreen(
     val manifestRetried = remember { mutableStateMapOf<String, Set<Int>>() }
     // slug канала, у которого поток выбран вручную из меню: при сбое сами на другой поток не прыгаем.
     var pinned by remember { mutableStateOf<String?>(null) }
-    // Пауза (timeshift): playWhenReady=false; сегменты копятся на диске.
+    // Пауза: playWhenReady=false.
     var paused by remember { mutableStateOf(false) }
-    // Карточка медиаплеера timeshift (открывается по паузе / OK на паузе).
+    // Режим timeshift (до «В эфир») — даже если видео играет с буфера.
+    var inTimeshift by remember { mutableStateOf(false) }
+    // Карточка медиаплеера (открывается по паузе / OK в режиме timeshift).
     var timeshiftUi by remember { mutableStateOf(false) }
     // Размер буфера (сек) — настройка; смена пересоздаёт плеер и лимит SimpleCache.
     var maxBufferSec by remember { mutableIntStateOf(PlayerPrefs.getMaxBufferSec(context)) }
@@ -225,6 +227,7 @@ fun PlayerScreen(
         slug = playlist[n]
         detail = false
         paused = false
+        inTimeshift = false
         timeshiftUi = false
     }
 
@@ -243,19 +246,28 @@ fun PlayerScreen(
         return maxOf(disk, loaded, fromBuf, fromLive, pauseBaseBytes)
     }
 
-    /** Пауза / продолжить. При входе в паузу открывается карточка медиаплеера. */
+    /** Пауза / продолжить. Вход в паузу включает timeshift и карточку плеера. */
     fun togglePause() {
         if (error != null || stream == null) return
         // Не срабатываем от того же OK, которым только что открыли карточку.
         if (System.currentTimeMillis() < detailIgnoreOkUntil) return
         if (paused) {
+            // Продолжить с буфера — остаёмся в timeshift, пока не «В эфир».
             paused = false
-            timeshiftUi = false
             detail = false
+            // карточку можно оставить открытой или закрыть; оставляем открытой
             exo.playWhenReady = true
-        } else if (exo.isPlaying || exo.playbackState == Player.STATE_READY || exo.playbackState == Player.STATE_BUFFERING) {
-            pauseBaseBytes = estimateBytesNow().coerceAtLeast(1L)
-            pauseStartedAt = System.currentTimeMillis()
+        } else if (
+            inTimeshift ||
+            exo.isPlaying ||
+            exo.playbackState == Player.STATE_READY ||
+            exo.playbackState == Player.STATE_BUFFERING
+        ) {
+            if (!inTimeshift) {
+                pauseBaseBytes = estimateBytesNow().coerceAtLeast(1L)
+                pauseStartedAt = System.currentTimeMillis()
+                inTimeshift = true
+            }
             detail = false
             paused = true
             timeshiftUi = true
@@ -274,7 +286,7 @@ fun PlayerScreen(
 
     /** Перемотка на паузе: −/+ SEEK_STEP_MS в пределах доступного окна. */
     fun seekBy(deltaMs: Long) {
-        if (!paused || error != null) return
+        if (!inTimeshift || error != null) return
         try {
             if (deltaMs < 0) exo.seekBack() else exo.seekForward()
         } catch (_: Exception) {
@@ -291,6 +303,7 @@ fun PlayerScreen(
     fun goLive() {
         if (System.currentTimeMillis() < detailIgnoreOkUntil) return
         paused = false
+        inTimeshift = false
         timeshiftUi = false
         StreamCache.clear()
         loadedBytesRef.set(0L)
@@ -424,6 +437,8 @@ fun PlayerScreen(
     LaunchedEffect(slug, stream?.url, nonce, maxBufferSec) {
         error = null
         paused = false
+        inTimeshift = false
+        timeshiftUi = false
         loadedBytesRef.set(0L)
         if (inBackground) return@LaunchedEffect
         if (stream == null) {
@@ -440,9 +455,9 @@ fun PlayerScreen(
         }
     }
 
-    // Счётчик только на timeshift: отставание и МБ всегда от одной величины (behindMs).
-    LaunchedEffect(paused) {
-        if (!paused) return@LaunchedEffect
+    // Счётчик на всём timeshift (пауза или воспроизведение с буфера).
+    LaunchedEffect(inTimeshift) {
+        if (!inTimeshift) return@LaunchedEffect
         while (true) {
             val liveOff = exo.currentLiveOffset
             val wallBehind = if (pauseStartedAt > 0L) System.currentTimeMillis() - pauseStartedAt else 0L
@@ -463,6 +478,7 @@ fun PlayerScreen(
     LaunchedEffect(slug) {
         pinned = null
         paused = false
+        inTimeshift = false
         timeshiftUi = false
         loadedBytesRef.set(0L)
     }
@@ -511,8 +527,8 @@ fun PlayerScreen(
             panel == PlayerPanel.Groups -> panel = PlayerPanel.Channels
             panel != PlayerPanel.None -> panel = PlayerPanel.None
             detail -> detail = false
-            timeshiftUi -> timeshiftUi = false  // закрыть плеер, видео остаётся на паузе
-            paused -> togglePause()             // ещё Назад — продолжить
+            timeshiftUi -> timeshiftUi = false  // закрыть карточку плеера
+            paused -> togglePause()             // ещё Назад на паузе — продолжить
             else -> onExit()
         }
     }
@@ -531,8 +547,8 @@ fun PlayerScreen(
                         Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> false
                         Key.ChannelUp, Key.ChannelDown, Key.PageUp, Key.PageDown -> true
                         Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
-                        Key.MediaRewind -> { if (paused) seekBy(-SEEK_STEP_MS); true }
-                        Key.MediaFastForward -> { if (paused) seekBy(SEEK_STEP_MS); true }
+                        Key.MediaRewind -> { if (inTimeshift) seekBy(-SEEK_STEP_MS); true }
+                        Key.MediaFastForward -> { if (inTimeshift) seekBy(SEEK_STEP_MS); true }
                         Key.MediaPlayPause, Key.MediaPlay, Key.MediaPause -> { togglePause(); true }
                         else -> false
                     }
@@ -553,10 +569,10 @@ fun PlayerScreen(
                     }
                     Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
                     Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
-                        if (paused) {
-                            // На timeshift OK открывает только карточку медиаплеера.
-                            timeshiftUi = true
+                        if (inTimeshift) {
+                            // В timeshift (пауза или игра с буфера) — только карточка медиаплеера.
                             detail = false
+                            timeshiftUi = true
                             detailIgnoreOkUntil = System.currentTimeMillis() + 450
                         } else {
                             detail = true
@@ -573,8 +589,8 @@ fun PlayerScreen(
                         if (paused) togglePause()
                         true
                     }
-                    Key.MediaRewind -> { if (paused) seekBy(-SEEK_STEP_MS); true }
-                    Key.MediaFastForward -> { if (paused) seekBy(SEEK_STEP_MS); true }
+                    Key.MediaRewind -> { if (inTimeshift) seekBy(-SEEK_STEP_MS); true }
+                    Key.MediaFastForward -> { if (inTimeshift) seekBy(SEEK_STEP_MS); true }
                     else -> false
                 }
             }
@@ -631,8 +647,8 @@ fun PlayerScreen(
             )
         }
 
-        // Timeshift — карточка медиаплеера (по паузе или OK на паузе)
-        if (paused && timeshiftUi && panel == PlayerPanel.None && error == null) {
+        // Timeshift — карточка медиаплеера (пауза или воспроизведение с буфера)
+        if (inTimeshift && timeshiftUi && panel == PlayerPanel.None && error == null) {
             val playFocus = remember { FocusRequester() }
             LaunchedEffect(timeshiftUi) {
                 delay(200)
@@ -686,7 +702,12 @@ fun PlayerScreen(
                         Txt("−10 с", size = 20.sp, weight = FontWeight.Bold, color = if (focused) OnAmber else TextMain)
                     }
                     FocusItem(focusRequester = playFocus, onClick = { togglePause() }) { focused ->
-                        Txt("▶  Продолжить", size = 20.sp, weight = FontWeight.Bold, color = if (focused) OnAmber else TextMain)
+                        Txt(
+                            if (paused) "▶  Продолжить" else "❚❚  Пауза",
+                            size = 20.sp,
+                            weight = FontWeight.Bold,
+                            color = if (focused) OnAmber else TextMain,
+                        )
                     }
                     FocusItem(onClick = { seekBy(SEEK_STEP_MS) }) { focused ->
                         Txt("+10 с", size = 20.sp, weight = FontWeight.Bold, color = if (focused) OnAmber else TextMain)
