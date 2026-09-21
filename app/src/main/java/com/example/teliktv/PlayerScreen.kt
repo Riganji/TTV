@@ -240,22 +240,28 @@ fun PlayerScreen(
         return maxOf(disk, loaded, fromBuf, fromLive, pauseBaseBytes)
     }
 
-    /** Пауза / продолжить с текущей позиции буфера. */
+    /** Пауза / продолжить. На паузе открывается карточка медиаплеера (timeshift). */
     fun togglePause() {
         if (error != null || stream == null) return
         // Не срабатываем от того же OK, которым только что открыли карточку.
         if (System.currentTimeMillis() < detailIgnoreOkUntil) return
         if (paused) {
             paused = false
+            detail = false
             exo.playWhenReady = true
         } else if (exo.isPlaying || exo.playbackState == Player.STATE_READY || exo.playbackState == Player.STATE_BUFFERING) {
-            pauseBaseBytes = estimateBytesNow()
+            pauseBaseBytes = estimateBytesNow().coerceAtLeast(1L)
             pauseStartedAt = System.currentTimeMillis()
+            detail = false   // закрыть EPG-карточку — вместо неё панель плеера
             paused = true
             exo.playWhenReady = false
-            cacheUsedMb = PlayerPrefs.formatMb(pauseBaseBytes)
             val off = exo.currentLiveOffset
-            shiftLabel = formatShift(if (off == C.TIME_UNSET || off < 0) exo.totalBufferedDuration else off)
+            val behind = if (off == C.TIME_UNSET || off < 0) exo.totalBufferedDuration.coerceAtLeast(0L) else off
+            shiftLabel = formatShift(behind)
+            // МБ сразу от глубины timeshift, чтобы счётчик не «залипал».
+            cacheUsedMb = PlayerPrefs.formatMb(
+                maxOf(pauseBaseBytes, (behind / 1000.0 * PlayerPrefs.MB_PER_SEC * 1024.0 * 1024.0).toLong()),
+            )
         }
     }
 
@@ -426,26 +432,21 @@ fun PlayerScreen(
         }
     }
 
-    // Счётчик кэша / отставание от эфира — только во время timeshift (пауза).
+    // Счётчик только на timeshift: отставание и МБ всегда от одной величины (behindMs).
     LaunchedEffect(paused) {
         if (!paused) return@LaunchedEffect
         while (true) {
-            val bytes = estimateBytesNow()
-            // Пока стоим на паузе, «глубина» timeshift растёт со временем (отстаём от live).
             val liveOff = exo.currentLiveOffset
-            val wallBehind = if (pauseStartedAt > 0L) {
-                System.currentTimeMillis() - pauseStartedAt
-            } else {
-                0L
-            }
+            val wallBehind = if (pauseStartedAt > 0L) System.currentTimeMillis() - pauseStartedAt else 0L
+            // liveOffset растёт, пока стоим; если поток не отдаёт offset — берём wall clock.
             val behindMs = when {
-                liveOff != C.TIME_UNSET && liveOff > 0L -> liveOff
+                liveOff != C.TIME_UNSET && liveOff > 0L -> maxOf(liveOff, wallBehind)
                 else -> maxOf(exo.totalBufferedDuration.coerceAtLeast(0L), wallBehind)
             }
-            // Оценка МБ: факт + прирост по времени паузы (докачка / отставание).
-            val wallBytes = (behindMs / 1000.0 * PlayerPrefs.MB_PER_SEC * 1024.0 * 1024.0).toLong()
-            cacheUsedMb = PlayerPrefs.formatMb(maxOf(bytes, wallBytes, 1L))
             shiftLabel = formatShift(behindMs)
+            // МБ всегда от отставания (≈0.5 МБ/с) — двигается вместе с таймером.
+            val fromBehind = (behindMs / 1000.0 * PlayerPrefs.MB_PER_SEC * 1024.0 * 1024.0).toLong()
+            cacheUsedMb = PlayerPrefs.formatMb(fromBehind.coerceAtLeast(1L))
             delay(400)
         }
     }
@@ -501,6 +502,7 @@ fun PlayerScreen(
             panel == PlayerPanel.Groups -> panel = PlayerPanel.Channels
             panel != PlayerPanel.None -> panel = PlayerPanel.None
             detail -> detail = false
+            paused -> togglePause()  // Назад на паузе = продолжить
             else -> onExit()
         }
     }
@@ -511,18 +513,17 @@ fun PlayerScreen(
             .background(Color.Black)
             .onPreviewKeyEvent { ev ->
                 if (panel != PlayerPanel.None || ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                // Карточка OK открыта: стрелки и OK — только навигация/нажатие кнопок (FocusItem).
-                if (detail) {
+                // Карточка EPG или timeshift-плеер: стрелки/OK — фокус и нажатие кнопок.
+                if (detail || paused) {
                     return@onPreviewKeyEvent when (ev.key) {
                         Key.DirectionLeft, Key.DirectionRight,
                         Key.DirectionUp, Key.DirectionDown,
                         Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> false
-                        // Не переключаем канал, пока открыта карточка.
                         Key.ChannelUp, Key.ChannelDown, Key.PageUp, Key.PageDown -> true
                         Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
-                        // Перемотка на паузе доступна и из карточки.
                         Key.MediaRewind -> { if (paused) seekBy(-SEEK_STEP_MS); true }
                         Key.MediaFastForward -> { if (paused) seekBy(SEEK_STEP_MS); true }
+                        Key.MediaPlayPause, Key.MediaPlay, Key.MediaPause -> { togglePause(); true }
                         else -> false
                     }
                 }
@@ -530,34 +531,20 @@ fun PlayerScreen(
                     Key.DirectionUp, Key.ChannelUp, Key.PageUp -> { zap(-1); true }
                     Key.DirectionDown, Key.ChannelDown, Key.PageDown -> { zap(1); true }
                     Key.DirectionLeft -> {
-                        if (paused) {
-                            seekBy(-SEEK_STEP_MS)
-                        } else {
-                            panelGroup = playGroup
-                            panel = PlayerPanel.Channels
-                            touch++
-                        }
+                        panelGroup = playGroup
+                        panel = PlayerPanel.Channels
+                        touch++
                         true
                     }
                     Key.DirectionRight -> {
-                        if (paused) {
-                            seekBy(SEEK_STEP_MS)
-                        } else {
-                            panel = PlayerPanel.Epg
-                            touch++
-                        }
+                        panel = PlayerPanel.Epg
+                        touch++
                         true
                     }
                     Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
                     Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
-                        if (paused) {
-                            // На паузе OK — открыть карточку с Продолжить / В эфир.
-                            detail = true
-                            detailIgnoreOkUntil = System.currentTimeMillis() + 450
-                        } else {
-                            detail = true
-                            detailIgnoreOkUntil = System.currentTimeMillis() + 450
-                        }
+                        detail = true
+                        detailIgnoreOkUntil = System.currentTimeMillis() + 450
                         true
                     }
                     Key.MediaPlayPause -> { togglePause(); true }
@@ -627,26 +614,72 @@ fun PlayerScreen(
             )
         }
 
-        // Пауза (timeshift) — кэш, отставание, перемотка; скрыта, если открыта карточка OK
-        if (paused && panel == PlayerPanel.None && !detail && error == null) {
+        // Timeshift — карточка как у медиаплеера (только на паузе)
+        if (paused && panel == PlayerPanel.None && error == null) {
+            val playFocus = remember { FocusRequester() }
+            LaunchedEffect(paused) {
+                delay(150)
+                try { playFocus.requestFocus() } catch (_: Exception) {}
+            }
+            // Доля заполнения шкалы: отставание / лимит буфера.
+            val maxMs = (maxBufferSec * 1000L).coerceAtLeast(1L)
+            val behindForBar = shiftLabel.trimStart('−').let { lab ->
+                // bar from liveOffset estimate via cache string is fragile; use pause clock
+                val wall = if (pauseStartedAt > 0L) System.currentTimeMillis() - pauseStartedAt else 0L
+                val liveOff = exo.currentLiveOffset
+                val b = when {
+                    liveOff != C.TIME_UNSET && liveOff > 0L -> maxOf(liveOff, wall)
+                    else -> maxOf(exo.totalBufferedDuration.coerceAtLeast(0L), wall)
+                }
+                (b.toFloat() / maxMs.toFloat()).coerceIn(0f, 1f)
+            }
             Column(
                 Modifier
-                    .align(Alignment.Center)
-                    .background(Color(0xCC000000), RoundedCornerShape(12.dp))
-                    .padding(horizontal = 28.dp, vertical = 20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xF2000000))))
+                    .padding(horizontal = 48.dp, vertical = 28.dp),
             ) {
-                Txt("ПАУЗА", size = 28.sp, weight = FontWeight.Bold, color = Amber)
-                Spacer(Modifier.height(8.dp))
-                Txt("$shiftLabel   ·   кэш: $cacheUsedMb", size = 22.sp, weight = FontWeight.Bold)
-                Spacer(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ChannelLogo(logo, channel?.title ?: slug)
+                    Spacer(Modifier.width(16.dp))
+                    Column(Modifier.weight(1f)) {
+                        Txt("$num${channel?.title ?: slug}", size = 26.sp, weight = FontWeight.Bold)
+                        Txt("TIMESHIFT  $shiftLabel", size = 18.sp, color = Amber)
+                    }
+                    Txt(cacheUsedMb, size = 22.sp, weight = FontWeight.Bold, color = Amber)
+                }
+                Spacer(Modifier.height(14.dp))
+                // Шкала: начало буфера → позиция → эфир
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Txt(shiftLabel, size = 15.sp, color = TextDim)
+                    Spacer(Modifier.width(10.dp))
+                    ProgressBar(behindForBar, Modifier.weight(1f).height(8.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Txt("эфир", size = 15.sp, color = TextDim)
+                }
+                Spacer(Modifier.height(16.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    FocusItem(onClick = { seekBy(-SEEK_STEP_MS) }) { focused ->
+                        Txt("−10 с", size = 20.sp, weight = FontWeight.Bold, color = if (focused) OnAmber else TextMain)
+                    }
+                    FocusItem(focusRequester = playFocus, onClick = { togglePause() }) { focused ->
+                        Txt("▶  Продолжить", size = 20.sp, weight = FontWeight.Bold, color = if (focused) OnAmber else TextMain)
+                    }
+                    FocusItem(onClick = { seekBy(SEEK_STEP_MS) }) { focused ->
+                        Txt("+10 с", size = 20.sp, weight = FontWeight.Bold, color = if (focused) OnAmber else TextMain)
+                    }
+                    FocusItem(onClick = { goLive() }) { focused ->
+                        Txt("В эфир", size = 20.sp, weight = FontWeight.Bold, color = if (focused) OnAmber else TextMain)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
                 Txt(
-                    "← −10 с     → +10 с",
-                    size = 17.sp,
-                    color = TextDim,
-                )
-                Txt(
-                    "OK — меню     лимит ${PlayerPrefs.hint(maxBufferSec)}",
+                    "← → кнопки     OK — нажать     Назад — продолжить     лимит ${PlayerPrefs.hint(maxBufferSec)}",
                     size = 15.sp,
                     color = TextDim,
                 )
@@ -673,8 +706,8 @@ fun PlayerScreen(
             }
         }
 
-        // Карточка «сейчас / далее» (OK) + Пауза / Продолжить
-        if (detail && panel == PlayerPanel.None && channel != null) {
+        // Карточка «сейчас / далее» (OK) + кнопка Пауза (на паузе показывается плеер выше)
+        if (detail && !paused && panel == PlayerPanel.None && channel != null) {
             val pauseFocus = remember { FocusRequester() }
             // Фокус на кнопку после отпускания OK, иначе то же нажатие активирует «Пауза».
             LaunchedEffect(detail) {
@@ -733,31 +766,16 @@ fun PlayerScreen(
                         onClick = { togglePause() },
                     ) { focused ->
                         Txt(
-                            if (paused) "Продолжить" else "Пауза",
+                            "❚❚  Пауза",
                             size = 20.sp,
                             weight = FontWeight.Bold,
                             color = if (focused) OnAmber else TextMain,
                         )
                     }
-                    if (paused) {
-                        FocusItem(onClick = { goLive() }) { focused ->
-                            Txt(
-                                "В эфир",
-                                size = 20.sp,
-                                weight = FontWeight.Bold,
-                                color = if (focused) OnAmber else TextMain,
-                            )
-                        }
-                        Txt("$shiftLabel · кэш: $cacheUsedMb", size = 18.sp, color = TextDim)
-                    }
                 }
                 Spacer(Modifier.height(8.dp))
                 Txt(
-                    if (paused) {
-                        "OK — нажать     Назад — закрыть     (перемотка ← → вне карточки)"
-                    } else {
-                        "OK — пауза     ← → кнопки     Назад — закрыть"
-                    },
+                    "OK — пауза (timeshift)     Назад — закрыть",
                     size = 15.sp,
                     color = TextDim,
                 )
