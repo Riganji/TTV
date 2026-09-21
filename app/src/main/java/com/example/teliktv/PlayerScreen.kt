@@ -23,6 +23,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,6 +59,7 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.ui.PlayerView
@@ -161,8 +163,12 @@ fun PlayerScreen(
     var paused by remember { mutableStateOf(false) }
     // Размер буфера (сек) — настройка; смена пересоздаёт плеер и лимит SimpleCache.
     var maxBufferSec by remember { mutableIntStateOf(PlayerPrefs.getMaxBufferSec(context)) }
-    // Занято кэшем на диске (МБ), обновляется на паузе.
+    // Занято кэшем (строка для UI).
     var cacheUsedMb by remember { mutableStateOf("0 МБ") }
+    // Байты, реально скачанные плеером (потокобезопасно — listener не на Main).
+    val loadedBytesRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    // После открытия карточки игнорируем OK на кнопках (иначе то же нажатие жмёт «Пауза»).
+    var detailIgnoreOkUntil by remember { mutableLongStateOf(0L) }
 
     // ---- плеер (создаём до действий, которые к нему обращаются)
     val exo = remember(maxBufferSec) {
@@ -182,6 +188,22 @@ fun PlayerScreen(
     }
     DisposableEffect(exo) { onDispose { exo.release() } }
 
+    // Считаем скачанные байты — надёжный источник для «кэш: N МБ».
+    DisposableEffect(exo) {
+        val analytics = object : AnalyticsListener {
+            override fun onLoadCompleted(
+                eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+                mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+            ) {
+                val n = loadEventInfo.bytesLoaded
+                if (n > 0) loadedBytesRef.addAndGet(n)
+            }
+        }
+        exo.addAnalyticsListener(analytics)
+        onDispose { exo.removeAnalyticsListener(analytics) }
+    }
+
     // ---- действия
 
     fun zap(delta: Int) {
@@ -196,6 +218,8 @@ fun PlayerScreen(
     /** Пауза / продолжить с текущей позиции буфера. */
     fun togglePause() {
         if (error != null || stream == null) return
+        // Не срабатываем от того же OK, которым только что открыли карточку.
+        if (System.currentTimeMillis() < detailIgnoreOkUntil) return
         if (paused) {
             paused = false
             exo.playWhenReady = true
@@ -207,8 +231,10 @@ fun PlayerScreen(
 
     /** В прямой эфир: seek на live edge + очистка дискового кэша. */
     fun goLive() {
+        if (System.currentTimeMillis() < detailIgnoreOkUntil) return
         paused = false
         StreamCache.clear()
+        loadedBytesRef.set(0L)
         cacheUsedMb = "0 МБ"
         exo.seekToDefaultPosition()
         exo.playWhenReady = true
@@ -337,6 +363,7 @@ fun PlayerScreen(
     LaunchedEffect(slug, stream?.url, nonce, maxBufferSec) {
         error = null
         paused = false
+        loadedBytesRef.set(0L)
         if (inBackground) return@LaunchedEffect
         if (stream == null) {
             exo.stop()
@@ -352,15 +379,16 @@ fun PlayerScreen(
         }
     }
 
-    // Счётчик кэша: диск + оценка по буферу плеера (обновляем на паузе и в карточке).
+    // Счётчик кэша: скачанные байты / диск / буфер плеера.
     LaunchedEffect(paused, detail) {
         if (!paused && !detail) return@LaunchedEffect
         while (true) {
             val disk = StreamCache.usedBytes(context)
+            val loaded = loadedBytesRef.get()
             val bufMs = exo.totalBufferedDuration.coerceAtLeast(0L)
             val fromPlayer = (bufMs / 1000.0 * PlayerPrefs.MB_PER_SEC * 1024.0 * 1024.0).toLong()
-            cacheUsedMb = PlayerPrefs.formatMb(maxOf(disk, fromPlayer))
-            delay(500)
+            cacheUsedMb = PlayerPrefs.formatMb(maxOf(disk, fromPlayer, loaded))
+            delay(400)
         }
     }
 
@@ -368,6 +396,7 @@ fun PlayerScreen(
     LaunchedEffect(slug) {
         pinned = null
         paused = false
+        loadedBytesRef.set(0L)
     }
     LaunchedEffect(slug, streamIdx) {
         brief = true
@@ -452,7 +481,9 @@ fun PlayerScreen(
                     }
                     Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
                     Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
+                        // Только открыть карточку; кнопки внутри не нажимаем этим же OK.
                         detail = true
+                        detailIgnoreOkUntil = System.currentTimeMillis() + 450
                         true
                     }
                     Key.MediaPlayPause -> { togglePause(); true }
@@ -569,7 +600,10 @@ fun PlayerScreen(
         // Карточка «сейчас / далее» (OK) + Пауза / Продолжить
         if (detail && panel == PlayerPanel.None && channel != null) {
             val pauseFocus = remember { FocusRequester() }
-            LaunchedEffect(detail, paused) {
+            // Фокус на кнопку после отпускания OK, иначе то же нажатие активирует «Пауза».
+            LaunchedEffect(detail) {
+                if (!detail) return@LaunchedEffect
+                delay(200)
                 try {
                     pauseFocus.requestFocus()
                 } catch (_: Exception) {
