@@ -288,20 +288,10 @@ fun PlayerScreen(
         // Не срабатываем от того же OK, которым только что открыли карточку.
         if (System.currentTimeMillis() < detailIgnoreOkUntil) return
         if (paused) {
-            // Продолжить только если позиция ещё в буфере; иначе — live (иначе IO_UNSPECIFIED).
+            // Продолжить с текущей позиции timeshift (не уходим в эфир).
             paused = false
             detail = false
-            val pos = exo.currentPosition
-            val bufDur = exo.totalBufferedDuration.coerceAtLeast(0L)
-            val bufferedEnd = exo.bufferedPosition
-            val minPos = (pos - bufDur).coerceAtLeast(0L)
-            val maxPos = maxOf(pos, bufferedEnd)
-            if (pos < minPos || (bufferedEnd > 0L && pos > bufferedEnd + 2_000L)) {
-                notice = "буфер timeshift устарел — прямой эфир"
-                goLive()
-            } else {
-                exo.playWhenReady = true
-            }
+            exo.playWhenReady = true
         } else if (
             inTimeshift ||
             exo.isPlaying ||
