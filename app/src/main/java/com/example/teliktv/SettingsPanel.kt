@@ -44,6 +44,8 @@ fun SettingsPanel(
     epgStatus: EpgStatus,
     failures: List<ChannelFailure>,
     update: UpdateState,
+    maxBufferSec: Int = PlayerPrefs.DEFAULT_SEC,
+    onBufferCycle: () -> Unit = {},
     onRefreshChannels: () -> Unit,
     onRefreshEpg: () -> Unit,
     onShowReport: () -> Unit,
@@ -51,6 +53,11 @@ fun SettingsPanel(
 ) {
     // Список пересобирается на каждой перекомпозиции — подписи показывают текущий статус.
     val items = listOf(
+        SettingsItem(
+            title = "Размер кэша (пауза)",
+            hint = PlayerPrefs.hint(maxBufferSec) + " — OK, сменить",
+            onClick = onBufferCycle,
+        ),
         SettingsItem(
             title = "Обновить каналы",
             hint = if (status.loading) {

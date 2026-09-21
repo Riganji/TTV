@@ -55,6 +55,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
@@ -69,8 +70,8 @@ private const val MAX_LIVE_RETRIES = 3
 
 /**
  * Ошибки разбора манифеста/контейнера — часто разовая случайность сети (оборванная или
- * усечённая загрузка), а не действительно нерабочий поток. Прежде чем переключаться на
- * следующий поток канала, один раз перезапрашиваем этот же.
+ * усечённая загрузка), а не действительно нерабочий поток. Один раз перезапрашиваем
+ * этот же поток; после второй неудачи всегда переключаемся на следующий.
  */
 private val MANIFEST_RETRY_CODES = setOf(
     PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
@@ -84,9 +85,11 @@ private val MANIFEST_RETRY_CODES = setOf(
  *  →                  — телепрограмма текущего канала
  *  Menu               — выбор потока
  *  OK                 — карточка «сейчас / далее» из телепрограммы
+ *  Play/Pause         — пауза (timeshift) / продолжить; повторный Play на паузе — в эфир
  *  Назад              — закрыть панель / выйти в список
  * Если поток не открылся или не стартует за Config.STREAM_TIMEOUT_MS — автоматически включается
  * следующий поток канала; когда исчерпаны все — один раз перепарсивается канал и всё повторяется.
+ * Манифест/контейнер: 1 повтор того же потока, после 2-й ошибки — сразу следующий поток.
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -152,6 +155,28 @@ fun PlayerScreen(
     val manifestRetried = remember { mutableStateMapOf<String, Set<Int>>() }
     // slug канала, у которого поток выбран вручную из меню: при сбое сами на другой поток не прыгаем.
     var pinned by remember { mutableStateOf<String?>(null) }
+    // Пауза (timeshift): playWhenReady=false, позиция в буфере сохраняется.
+    var paused by remember { mutableStateOf(false) }
+    // Размер буфера (сек) — настройка; смена пересоздаёт плеер.
+    var maxBufferSec by remember { mutableIntStateOf(PlayerPrefs.getMaxBufferSec(context)) }
+
+    // ---- плеер (создаём до действий, которые к нему обращаются)
+    // maxBufferMs ≈ время, на которое можно поставить паузу на live-потоке.
+    val exo = remember(maxBufferSec) {
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                /* minBufferMs */ 15_000,
+                /* maxBufferMs */ maxBufferSec * 1000,
+                /* bufferForPlaybackMs */ 2_500,
+                /* bufferForPlaybackAfterRebufferMs */ 5_000,
+            )
+            .build()
+        ExoPlayer.Builder(context)
+            .setLoadControl(loadControl)
+            .build()
+            .apply { playWhenReady = true }
+    }
+    DisposableEffect(exo) { onDispose { exo.release() } }
 
     // ---- действия
 
@@ -161,6 +186,27 @@ fun PlayerScreen(
         val n = if (i < 0) (if (delta > 0) 0 else playlist.size - 1) else (i + delta).mod(playlist.size)
         slug = playlist[n]
         detail = false
+        paused = false
+    }
+
+    /** Пауза / продолжить с текущей позиции буфера. */
+    fun togglePause() {
+        if (error != null || stream == null) return
+        if (paused) {
+            paused = false
+            exo.playWhenReady = true
+        } else if (exo.isPlaying || exo.playbackState == Player.STATE_READY || exo.playbackState == Player.STATE_BUFFERING) {
+            paused = true
+            exo.playWhenReady = false
+        }
+    }
+
+    /** В прямой эфир: seek на live edge (сброс позиции timeshift / «очистка кэша» по позиции). */
+    fun goLive() {
+        paused = false
+        exo.seekToDefaultPosition()
+        exo.playWhenReady = true
+        notice = "прямой эфир"
     }
 
     /** Перепарсить канал; resetStream — вернуться на первый поток (когда перебрали все). */
@@ -188,6 +234,7 @@ fun PlayerScreen(
         val cur = (chosen[s] ?: 0).coerceIn(0, (list.size - 1).coerceAtLeast(0))
         val failed = (failedStreams[s] ?: emptySet()) + cur
         failedStreams[s] = failed
+        paused = false
         // Поток выбран вручную — не перескакиваем сами: показываем причину, дальше выбирает пользователь.
         if (pinned == s) {
             error = "«${list.getOrNull(cur)?.label ?: "Поток"}» не открылся ($reason)"
@@ -208,10 +255,6 @@ fun PlayerScreen(
         }
     }
 
-    // ---- плеер
-    val exo = remember { ExoPlayer.Builder(context).build().apply { playWhenReady = true } }
-    DisposableEffect(Unit) { onDispose { exo.release() } }
-
     DisposableEffect(exo) {
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
@@ -229,12 +272,13 @@ fun PlayerScreen(
                 // достаточно вернуться на «живую» позицию — переключать поток не нужно.
                 if (e.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW && liveRetries < MAX_LIVE_RETRIES) {
                     liveRetries++
+                    paused = false
                     exo.seekToDefaultPosition()
                     exo.prepare()
+                    exo.playWhenReady = true
                     return
                 }
-                // Манифест/контейнер не разобрался — прежде чем считать поток нерабочим,
-                // пробуем скачать его ещё раз: часто это была усечённая загрузка, а не мёртвая ссылка.
+                // Манифест/контейнер: 1 повтор того же потока; после 2-й ошибки — сразу следующий.
                 if (e.errorCode in MANIFEST_RETRY_CODES) {
                     val s = currentSlug
                     val idx = chosen[s] ?: 0
@@ -245,19 +289,21 @@ fun PlayerScreen(
                         nonce++
                         return
                     }
-                    // Повтор не помог. Код ошибки не говорит, что именно пришло вместо плейлиста
-                    // (HTML-заглушка, пустой ответ, битый плейлист) — спрашиваем саму ссылку.
+                    // Вторая неудача — всегда сразу переходим на следующий поток.
+                    // Уточнение причины (HTML/пусто/битый) — асинхронно, только для текста.
                     val failedStream = bySlugState[s]?.streams?.getOrNull(idx)
+                    val codeName = e.errorCodeName
+                    onStreamFailed(codeName)
                     if (failedStream != null) {
                         scope.launch {
                             val why = StreamProbe.describe(failedStream)
-                            // Пока шёл запрос, пользователь мог переключить поток или канал — тогда результат не нужен.
-                            if (currentSlug == s && (chosen[s] ?: 0) == idx) {
-                                onStreamFailed("${e.errorCodeName}: $why")
-                            }
+                            val refined = "$codeName: $why"
+                            // Подменяем код в уже показанном notice/error, если ещё актуально.
+                            notice = notice?.replace(codeName, refined)
+                            error = error?.replace(codeName, refined)
                         }
-                        return
                     }
+                    return
                 }
                 onStreamFailed(e.errorCodeName)
             }
@@ -282,8 +328,9 @@ fun PlayerScreen(
         onDispose { lifecycleOwner?.lifecycle?.removeObserver(observer) }
     }
 
-    LaunchedEffect(slug, stream?.url, nonce) {
+    LaunchedEffect(slug, stream?.url, nonce, maxBufferSec) {
         error = null
+        paused = false
         if (inBackground) return@LaunchedEffect
         if (stream == null) {
             exo.stop()
@@ -294,13 +341,16 @@ fun PlayerScreen(
         exo.playWhenReady = true
         // «Висящий» поток без ошибки тоже считаем нерабочим.
         delay(Config.STREAM_TIMEOUT_MS)
-        if (!inBackground && exo.playbackState != Player.STATE_READY) {
+        if (!inBackground && !paused && exo.playbackState != Player.STATE_READY) {
             onStreamFailed("нет ответа за ${Config.STREAM_TIMEOUT_MS / 1000} с")
         }
     }
 
     LaunchedEffect(slug, playGroup) { onCurrent(slug, playGroup) }
-    LaunchedEffect(slug) { pinned = null }
+    LaunchedEffect(slug) {
+        pinned = null
+        paused = false
+    }
     LaunchedEffect(slug, streamIdx) {
         brief = true
         delay(3500)
@@ -367,7 +417,20 @@ fun PlayerScreen(
                     }
                     Key.DirectionRight -> { panel = PlayerPanel.Epg; touch++; true }
                     Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
-                    Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> { detail = !detail; true }
+                    Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
+                        // На паузе OK — в прямой эфир (сброс timeshift / «очистка кэша»).
+                        if (paused) goLive() else detail = !detail
+                        true
+                    }
+                    Key.MediaPlayPause -> { togglePause(); true }
+                    Key.MediaPause -> {
+                        if (!paused) togglePause()
+                        true
+                    }
+                    Key.MediaPlay -> {
+                        if (paused) togglePause()  // продолжить с буфера
+                        true
+                    }
                     else -> false
                 }
             }
@@ -386,6 +449,7 @@ fun PlayerScreen(
                     player = exo
                 }
             },
+            update = { view -> view.player = exo },
         )
 
         // Короткая плашка после переключения
@@ -421,6 +485,30 @@ fun PlayerScreen(
                 color = Amber,
                 maxLines = 2,
             )
+        }
+
+        // Пауза (timeshift)
+        if (paused && panel == PlayerPanel.None && error == null) {
+            Column(
+                Modifier
+                    .align(Alignment.Center)
+                    .background(Color(0xCC000000), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 28.dp, vertical = 20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Txt("ПАУЗА", size = 28.sp, weight = FontWeight.Bold, color = Amber)
+                Spacer(Modifier.height(8.dp))
+                Txt(
+                    "Play — продолжить   ·   OK — в эфир",
+                    size = 17.sp,
+                    color = TextDim,
+                )
+                Txt(
+                    "буфер до ${PlayerPrefs.hint(maxBufferSec)}",
+                    size = 15.sp,
+                    color = TextDim,
+                )
+            }
         }
 
         // Ошибка / перепарсинг
@@ -561,6 +649,13 @@ fun PlayerScreen(
                         epgStatus = epgStatus,
                         failures = failures,
                         update = update,
+                        maxBufferSec = maxBufferSec,
+                        onBufferCycle = {
+                            val next = PlayerPrefs.next(maxBufferSec)
+                            PlayerPrefs.setMaxBufferSec(context, next)
+                            maxBufferSec = next
+                            notice = "буфер: ${PlayerPrefs.hint(next)}"
+                        },
                         onRefreshChannels = {
                             panel = PlayerPanel.None
                             onRefresh()
