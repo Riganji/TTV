@@ -6,7 +6,7 @@ import android.content.Context
  * Настройки плеера (SharedPreferences «teliktv»).
  * maxBufferSec — максимальный размер буфера ExoPlayer в секундах:
  * это и есть примерное время, на которое можно поставить паузу (timeshift)
- * при типичном битрейте ~3–5 Мбит/с HD.
+ * при типичном битрейте ~4 Мбит/с HD (~0,5 МБ/с).
  */
 object PlayerPrefs {
     private const val PREFS = "teliktv"
@@ -16,6 +16,9 @@ object PlayerPrefs {
     val OPTIONS = listOf(30, 60, 120, 180, 300)
 
     const val DEFAULT_SEC = 60
+
+    /** Оценка битрейта для перевода секунд → МБ (~4 Мбит/с HD). */
+    private const val MB_PER_SEC = 0.5  // 4 Мбит/с / 8 = 0,5 МБ/с
 
     fun getMaxBufferSec(context: Context): Int {
         val v = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -37,14 +40,14 @@ object PlayerPrefs {
         return OPTIONS[(i + 1) % OPTIONS.size]
     }
 
-    /** Человекочитаемая оценка времени паузы. */
+    /** «время (примерный размер МБ)» — для настроек и оверлея паузы. */
     fun hint(sec: Int): String {
-        val min = sec / 60.0
         val time = when {
-            sec < 60 -> "≈ $sec с"
-            sec % 60 == 0 -> "≈ ${sec / 60} мин"
-            else -> "≈ ${"%.1f".format(min)} мин"
+            sec < 60 -> "$sec с"
+            sec % 60 == 0 -> "${sec / 60} мин"
+            else -> "${"%.1f".format(sec / 60.0)} мин"
         }
-        return "$time паузы (при ~4 Мбит/с HD)"
+        val mb = (sec * MB_PER_SEC).toInt().coerceAtLeast(1)
+        return "$time (≈$mb МБ)"
     }
 }
