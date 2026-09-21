@@ -3,6 +3,7 @@
 local.properties
 .idea/
 build/
+teliktv-keys/
 *.apk
 .backup/
 .DS_Store
