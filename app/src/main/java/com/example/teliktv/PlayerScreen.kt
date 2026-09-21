@@ -49,6 +49,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
@@ -70,6 +71,9 @@ private enum class PlayerPanel { None, Channels, Groups, Streams, Epg, Settings 
 
 /** Сколько раз подряд пробуем вернуться на «живую» позицию после BEHIND_LIVE_WINDOW, прежде чем считать поток нерабочим. */
 private const val MAX_LIVE_RETRIES = 3
+
+/** Шаг перемотки в timeshift. */
+private const val SEEK_STEP_MS = 10_000L
 
 /**
  * Ошибки разбора манифеста/контейнера — часто разовая случайность сети (оборванная или
@@ -163,12 +167,16 @@ fun PlayerScreen(
     var paused by remember { mutableStateOf(false) }
     // Размер буфера (сек) — настройка; смена пересоздаёт плеер и лимит SimpleCache.
     var maxBufferSec by remember { mutableIntStateOf(PlayerPrefs.getMaxBufferSec(context)) }
-    // Занято кэшем (строка для UI).
+    // Занято кэшем / позиция timeshift (строки для UI, только на паузе).
     var cacheUsedMb by remember { mutableStateOf("0 МБ") }
+    var shiftLabel by remember { mutableStateOf("−0:00") }
     // Байты, реально скачанные плеером (потокобезопасно — listener не на Main).
     val loadedBytesRef = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     // После открытия карточки игнорируем OK на кнопках (иначе то же нажатие жмёт «Пауза»).
     var detailIgnoreOkUntil by remember { mutableLongStateOf(0L) }
+    // Момент входа в паузу и оценка объёма на этот момент.
+    var pauseStartedAt by remember { mutableLongStateOf(0L) }
+    var pauseBaseBytes by remember { mutableLongStateOf(0L) }
 
     // ---- плеер (создаём до действий, которые к нему обращаются)
     val exo = remember(maxBufferSec) {
@@ -183,6 +191,8 @@ fun PlayerScreen(
             .build()
         ExoPlayer.Builder(context)
             .setLoadControl(loadControl)
+            .setSeekBackIncrementMs(SEEK_STEP_MS)
+            .setSeekForwardIncrementMs(SEEK_STEP_MS)
             .build()
             .apply { playWhenReady = true }
     }
@@ -215,6 +225,21 @@ fun PlayerScreen(
         paused = false
     }
 
+    fun formatShift(ms: Long): String {
+        val sec = (ms.coerceAtLeast(0L) / 1000L).toInt()
+        return "−%d:%02d".format(sec / 60, sec % 60)
+    }
+
+    fun estimateBytesNow(): Long {
+        val disk = StreamCache.usedBytes(context)
+        val loaded = loadedBytesRef.get()
+        val bufMs = exo.totalBufferedDuration.coerceAtLeast(0L)
+        val fromBuf = (bufMs / 1000.0 * PlayerPrefs.MB_PER_SEC * 1024.0 * 1024.0).toLong()
+        val liveOff = exo.currentLiveOffset.let { if (it == C.TIME_UNSET || it < 0) 0L else it }
+        val fromLive = (liveOff / 1000.0 * PlayerPrefs.MB_PER_SEC * 1024.0 * 1024.0).toLong()
+        return maxOf(disk, loaded, fromBuf, fromLive, pauseBaseBytes)
+    }
+
     /** Пауза / продолжить с текущей позиции буфера. */
     fun togglePause() {
         if (error != null || stream == null) return
@@ -224,9 +249,29 @@ fun PlayerScreen(
             paused = false
             exo.playWhenReady = true
         } else if (exo.isPlaying || exo.playbackState == Player.STATE_READY || exo.playbackState == Player.STATE_BUFFERING) {
+            pauseBaseBytes = estimateBytesNow()
+            pauseStartedAt = System.currentTimeMillis()
             paused = true
             exo.playWhenReady = false
+            cacheUsedMb = PlayerPrefs.formatMb(pauseBaseBytes)
+            val off = exo.currentLiveOffset
+            shiftLabel = formatShift(if (off == C.TIME_UNSET || off < 0) exo.totalBufferedDuration else off)
         }
+    }
+
+    /** Перемотка на паузе: −/+ SEEK_STEP_MS в пределах доступного окна. */
+    fun seekBy(deltaMs: Long) {
+        if (!paused || error != null) return
+        try {
+            if (deltaMs < 0) exo.seekBack() else exo.seekForward()
+        } catch (_: Exception) {
+            val pos = exo.currentPosition
+            val target = (pos + deltaMs).coerceAtLeast(0L)
+            exo.seekTo(target)
+        }
+        // Сразу обновим подпись позиции.
+        val off = exo.currentLiveOffset
+        shiftLabel = formatShift(if (off == C.TIME_UNSET || off < 0) 0L else off)
     }
 
     /** В прямой эфир: seek на live edge + очистка дискового кэша. */
@@ -235,7 +280,9 @@ fun PlayerScreen(
         paused = false
         StreamCache.clear()
         loadedBytesRef.set(0L)
+        pauseBaseBytes = 0L
         cacheUsedMb = "0 МБ"
+        shiftLabel = "−0:00"
         exo.seekToDefaultPosition()
         exo.playWhenReady = true
         notice = "прямой эфир"
@@ -379,15 +426,26 @@ fun PlayerScreen(
         }
     }
 
-    // Счётчик кэша только во время timeshift (пауза), не во время обычного эфира.
+    // Счётчик кэша / отставание от эфира — только во время timeshift (пауза).
     LaunchedEffect(paused) {
         if (!paused) return@LaunchedEffect
         while (true) {
-            val disk = StreamCache.usedBytes(context)
-            val loaded = loadedBytesRef.get()
-            val bufMs = exo.totalBufferedDuration.coerceAtLeast(0L)
-            val fromPlayer = (bufMs / 1000.0 * PlayerPrefs.MB_PER_SEC * 1024.0 * 1024.0).toLong()
-            cacheUsedMb = PlayerPrefs.formatMb(maxOf(disk, fromPlayer, loaded))
+            val bytes = estimateBytesNow()
+            // Пока стоим на паузе, «глубина» timeshift растёт со временем (отстаём от live).
+            val liveOff = exo.currentLiveOffset
+            val wallBehind = if (pauseStartedAt > 0L) {
+                System.currentTimeMillis() - pauseStartedAt
+            } else {
+                0L
+            }
+            val behindMs = when {
+                liveOff != C.TIME_UNSET && liveOff > 0L -> liveOff
+                else -> maxOf(exo.totalBufferedDuration.coerceAtLeast(0L), wallBehind)
+            }
+            // Оценка МБ: факт + прирост по времени паузы (докачка / отставание).
+            val wallBytes = (behindMs / 1000.0 * PlayerPrefs.MB_PER_SEC * 1024.0 * 1024.0).toLong()
+            cacheUsedMb = PlayerPrefs.formatMb(maxOf(bytes, wallBytes, 1L))
+            shiftLabel = formatShift(behindMs)
             delay(400)
         }
     }
@@ -462,6 +520,9 @@ fun PlayerScreen(
                         // Не переключаем канал, пока открыта карточка.
                         Key.ChannelUp, Key.ChannelDown, Key.PageUp, Key.PageDown -> true
                         Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
+                        // Перемотка на паузе доступна и из карточки.
+                        Key.MediaRewind -> { if (paused) seekBy(-SEEK_STEP_MS); true }
+                        Key.MediaFastForward -> { if (paused) seekBy(SEEK_STEP_MS); true }
                         else -> false
                     }
                 }
@@ -469,21 +530,34 @@ fun PlayerScreen(
                     Key.DirectionUp, Key.ChannelUp, Key.PageUp -> { zap(-1); true }
                     Key.DirectionDown, Key.ChannelDown, Key.PageDown -> { zap(1); true }
                     Key.DirectionLeft -> {
-                        panelGroup = playGroup
-                        panel = PlayerPanel.Channels
-                        touch++
+                        if (paused) {
+                            seekBy(-SEEK_STEP_MS)
+                        } else {
+                            panelGroup = playGroup
+                            panel = PlayerPanel.Channels
+                            touch++
+                        }
                         true
                     }
                     Key.DirectionRight -> {
-                        panel = PlayerPanel.Epg
-                        touch++
+                        if (paused) {
+                            seekBy(SEEK_STEP_MS)
+                        } else {
+                            panel = PlayerPanel.Epg
+                            touch++
+                        }
                         true
                     }
                     Key.Menu -> { panel = PlayerPanel.Streams; touch++; true }
                     Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
-                        // Только открыть карточку; кнопки внутри не нажимаем этим же OK.
-                        detail = true
-                        detailIgnoreOkUntil = System.currentTimeMillis() + 450
+                        if (paused) {
+                            // На паузе OK — открыть карточку с Продолжить / В эфир.
+                            detail = true
+                            detailIgnoreOkUntil = System.currentTimeMillis() + 450
+                        } else {
+                            detail = true
+                            detailIgnoreOkUntil = System.currentTimeMillis() + 450
+                        }
                         true
                     }
                     Key.MediaPlayPause -> { togglePause(); true }
@@ -495,6 +569,8 @@ fun PlayerScreen(
                         if (paused) togglePause()
                         true
                     }
+                    Key.MediaRewind -> { if (paused) seekBy(-SEEK_STEP_MS); true }
+                    Key.MediaFastForward -> { if (paused) seekBy(SEEK_STEP_MS); true }
                     else -> false
                 }
             }
@@ -551,7 +627,7 @@ fun PlayerScreen(
             )
         }
 
-        // Пауза (timeshift) — счётчик кэша; скрыта, если открыта карточка OK
+        // Пауза (timeshift) — кэш, отставание, перемотка; скрыта, если открыта карточка OK
         if (paused && panel == PlayerPanel.None && !detail && error == null) {
             Column(
                 Modifier
@@ -562,15 +638,15 @@ fun PlayerScreen(
             ) {
                 Txt("ПАУЗА", size = 28.sp, weight = FontWeight.Bold, color = Amber)
                 Spacer(Modifier.height(8.dp))
-                Txt("кэш: $cacheUsedMb", size = 22.sp, weight = FontWeight.Bold)
+                Txt("$shiftLabel   ·   кэш: $cacheUsedMb", size = 22.sp, weight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
                 Txt(
-                    "OK — продолжить   ·   → — в эфир",
+                    "← −10 с     → +10 с",
                     size = 17.sp,
                     color = TextDim,
                 )
                 Txt(
-                    "лимит ${PlayerPrefs.hint(maxBufferSec)}",
+                    "OK — меню     лимит ${PlayerPrefs.hint(maxBufferSec)}",
                     size = 15.sp,
                     color = TextDim,
                 )
@@ -672,13 +748,13 @@ fun PlayerScreen(
                                 color = if (focused) OnAmber else TextMain,
                             )
                         }
-                        Txt("кэш: $cacheUsedMb", size = 18.sp, color = TextDim)
+                        Txt("$shiftLabel · кэш: $cacheUsedMb", size = 18.sp, color = TextDim)
                     }
                 }
                 Spacer(Modifier.height(8.dp))
                 Txt(
                     if (paused) {
-                        "← → кнопки     OK — нажать     Назад — закрыть"
+                        "OK — нажать     Назад — закрыть     (перемотка ← → вне карточки)"
                     } else {
                         "OK — пауза     ← → кнопки     Назад — закрыть"
                     },
