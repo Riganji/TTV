@@ -57,7 +57,6 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
@@ -76,14 +75,34 @@ private const val MAX_LIVE_RETRIES = 3
 private const val SEEK_STEP_MS = 10_000L
 
 /**
- * Ошибки разбора манифеста/контейнера — часто разовая случайность сети (оборванная или
- * усечённая загрузка), а не действительно нерабочий поток. Один раз перезапрашиваем
- * этот же поток; после второй неудачи всегда переключаемся на следующий.
+ * Сетевые / разбор манифеста — часто разовая случайность. Один повтор того же потока,
+ * после второй ошибки — следующий.
  */
-private val MANIFEST_RETRY_CODES = setOf(
+private val STREAM_RETRY_CODES = setOf(
     PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
     PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+    PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+    PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE,
+    PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE,
+    PlaybackException.ERROR_CODE_TIMEOUT,
 )
+
+/** Понятное описание кода ExoPlayer для уведомлений. */
+private fun streamErrorLabel(code: Int, codeName: String): String = when (code) {
+    PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "нет связи с сервером потока"
+    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> "сервер потока ответил ошибкой"
+    PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE -> "сервер отдал не видео"
+    PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED -> "битый манифест / контейнер"
+    PlaybackException.ERROR_CODE_TIMEOUT -> "таймаут загрузки"
+    PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW -> "отставание от эфира"
+    else -> codeName
+}
 
 /**
  * Управление пультом (панели закрыты):
@@ -159,6 +178,7 @@ fun PlayerScreen(
     var inBackground by remember { mutableStateOf(false) }   // Home / экран выключен
     var retried by remember { mutableStateOf(emptySet<String>()) }
     var liveRetries by remember { mutableIntStateOf(0) }   // подряд BEHIND_LIVE_WINDOW без выхода в READY
+    var timeshiftIoRetries by remember { mutableIntStateOf(0) }  // сбои IO только в timeshift
     // slug -> индексы потоков, для которых уже была одна повторная попытка после malformed-ошибки.
     val manifestRetried = remember { mutableStateMapOf<String, Set<Int>>() }
     // slug канала, у которого поток выбран вручную из меню: при сбое сами на другой поток не прыгаем.
@@ -184,7 +204,6 @@ fun PlayerScreen(
 
     // ---- плеер (создаём до действий, которые к нему обращаются)
     val exo = remember(maxBufferSec) {
-        StreamCache.get(context, PlayerPrefs.maxCacheBytes(maxBufferSec))
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 /* minBufferMs */ 15_000,
@@ -252,11 +271,20 @@ fun PlayerScreen(
         // Не срабатываем от того же OK, которым только что открыли карточку.
         if (System.currentTimeMillis() < detailIgnoreOkUntil) return
         if (paused) {
-            // Продолжить с буфера — остаёмся в timeshift, пока не «В эфир».
+            // Продолжить только если позиция ещё в буфере; иначе — live (иначе IO_UNSPECIFIED).
             paused = false
             detail = false
-            // карточку можно оставить открытой или закрыть; оставляем открытой
-            exo.playWhenReady = true
+            val pos = exo.currentPosition
+            val bufDur = exo.totalBufferedDuration.coerceAtLeast(0L)
+            val bufferedEnd = exo.bufferedPosition
+            val minPos = (pos - bufDur).coerceAtLeast(0L)
+            val maxPos = maxOf(pos, bufferedEnd)
+            if (pos < minPos || (bufferedEnd > 0L && pos > bufferedEnd + 2_000L)) {
+                notice = "буфер timeshift устарел — прямой эфир"
+                goLive()
+            } else {
+                exo.playWhenReady = true
+            }
         } else if (
             inTimeshift ||
             exo.isPlaying ||
@@ -267,6 +295,7 @@ fun PlayerScreen(
                 pauseBaseBytes = estimateBytesNow().coerceAtLeast(1L)
                 pauseStartedAt = System.currentTimeMillis()
                 inTimeshift = true
+                timeshiftIoRetries = 0
             }
             detail = false
             paused = true
@@ -284,19 +313,30 @@ fun PlayerScreen(
         }
     }
 
-    /** Перемотка на паузе: −/+ SEEK_STEP_MS в пределах доступного окна. */
+    /**
+     * Перемотка только внутри уже загруженного буфера.
+     * Seek за край буфера / live-окна на CDN даёт ERROR_CODE_IO_UNSPECIFIED.
+     */
     fun seekBy(deltaMs: Long) {
         if (!inTimeshift || error != null) return
-        try {
-            if (deltaMs < 0) exo.seekBack() else exo.seekForward()
-        } catch (_: Exception) {
-            val pos = exo.currentPosition
-            val target = (pos + deltaMs).coerceAtLeast(0L)
-            exo.seekTo(target)
+        if (!exo.isCurrentMediaItemSeekable) {
+            notice = "перемотка недоступна на этом потоке"
+            return
         }
-        // Сразу обновим подпись позиции.
+        val pos = exo.currentPosition
+        val bufferedEnd = exo.bufferedPosition
+        val bufDur = exo.totalBufferedDuration.coerceAtLeast(0L)
+        // Левый край ≈ то, что ещё в RAM; правый — bufferedPosition (не дальше live).
+        val minPos = (pos - bufDur).coerceAtLeast(0L)
+        val maxPos = maxOf(pos, bufferedEnd)
+        val target = (pos + deltaMs).coerceIn(minPos, maxPos)
+        if (kotlin.math.abs(target - pos) < 500L) {
+            notice = if (deltaMs < 0) "начало буфера timeshift" else "край буфера timeshift"
+            return
+        }
+        exo.seekTo(target)
         val off = exo.currentLiveOffset
-        shiftLabel = formatShift(if (off == C.TIME_UNSET || off < 0) 0L else off)
+        shiftLabel = formatShift(if (off == C.TIME_UNSET || off < 0) (maxPos - target) else off)
     }
 
     /** В прямой эфир: seek на live edge + очистка дискового кэша. */
@@ -305,6 +345,7 @@ fun PlayerScreen(
         paused = false
         inTimeshift = false
         timeshiftUi = false
+        timeshiftIoRetries = 0
         StreamCache.clear()
         loadedBytesRef.set(0L)
         pauseBaseBytes = 0L
@@ -374,8 +415,22 @@ fun PlayerScreen(
             }
 
             override fun onPlayerError(e: PlaybackException) {
-                // Отстали от окна прямого эфира (пауза, буферизация, просадка сети): поток жив,
-                // достаточно вернуться на «живую» позицию — переключать поток не нужно.
+                val label = streamErrorLabel(e.errorCode, e.errorCodeName)
+
+                // --- Timeshift: позиция вне live-окна / IO — не меняем поток, выходим в эфир ---
+                // Причина: seek или пауза ушли за доступные сегменты CDN; «лечение» seek'ом
+                // только усугубляет IO_UNSPECIFIED. Безопасный выход — live edge.
+                if (inTimeshift && (
+                        e.errorCode in STREAM_RETRY_CODES ||
+                        e.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW
+                    )
+                ) {
+                    notice = "$label — буфер timeshift недоступен, прямой эфир"
+                    goLive()
+                    return
+                }
+
+                // --- Обычный эфир: отстали от live-окна ---
                 if (e.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW && liveRetries < MAX_LIVE_RETRIES) {
                     liveRetries++
                     paused = false
@@ -384,34 +439,35 @@ fun PlayerScreen(
                     exo.playWhenReady = true
                     return
                 }
-                // Манифест/контейнер: 1 повтор того же потока; после 2-й ошибки — сразу следующий.
-                if (e.errorCode in MANIFEST_RETRY_CODES) {
+
+                // --- Обычный эфир: сеть / манифест — 1 повтор, затем следующий поток ---
+                if (e.errorCode in STREAM_RETRY_CODES) {
                     val s = currentSlug
                     val idx = chosen[s] ?: 0
                     val done = manifestRetried[s] ?: emptySet()
                     if (idx !in done) {
                         manifestRetried[s] = done + idx
-                        notice = "поток не открылся с первого раза — пробую ещё раз"
+                        notice = "$label — пробую ещё раз"
                         nonce++
                         return
                     }
-                    // Вторая неудача — всегда сразу переходим на следующий поток.
-                    // Уточнение причины (HTML/пусто/битый) — асинхронно, только для текста.
                     val failedStream = bySlugState[s]?.streams?.getOrNull(idx)
-                    val codeName = e.errorCodeName
-                    onStreamFailed(codeName)
-                    if (failedStream != null) {
+                    onStreamFailed(label)
+                    if (failedStream != null && e.errorCode in setOf(
+                            PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+                            PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+                        )
+                    ) {
                         scope.launch {
                             val why = StreamProbe.describe(failedStream)
-                            val refined = "$codeName: $why"
-                            // Подменяем код в уже показанном notice/error, если ещё актуально.
-                            notice = notice?.replace(codeName, refined)
-                            error = error?.replace(codeName, refined)
+                            val refined = "$label: $why"
+                            notice = notice?.replace(label, refined)
+                            error = error?.replace(label, refined)
                         }
                     }
                     return
                 }
-                onStreamFailed(e.errorCodeName)
+                onStreamFailed(label)
             }
         }
         exo.addListener(listener)
@@ -1004,7 +1060,11 @@ fun PlayerScreen(
     }
 }
 
-/** Ссылки отдаются с проверкой Referer; сегменты пишутся в дисковый SimpleCache. */
+/**
+ * Live-потоки: только HTTP + RAM-буфер ExoPlayer (LoadControl).
+ * Дисковый кэш live-сегментов после сдвига окна CDN отдаёт протухшие куски →
+ * ERROR_CODE_IO_UNSPECIFIED при timeshift/seek. Timeshift = то, что ещё в maxBufferMs.
+ */
 @OptIn(UnstableApi::class)
 private fun buildSource(context: Context, s: StreamItem, maxBufferSec: Int): MediaSource {
     val http = DefaultHttpDataSource.Factory()
@@ -1017,17 +1077,7 @@ private fun buildSource(context: Context, s: StreamItem, maxBufferSec: Int): Med
         // получает половину плейлиста и падает с PARSING_MANIFEST_MALFORMED. Плейлисты
         // маленькие, разжимать их всё равно не нужно.
         .setDefaultRequestProperties(mapOf("Referer" to s.referer, "Accept-Encoding" to "identity"))
-    val cache = StreamCache.get(context, PlayerPrefs.maxCacheBytes(maxBufferSec))
-    // Пишем сегменты на диск всегда (live часто шлёт no-store — без sink кэш остаётся пустым).
-    val sink = androidx.media3.datasource.cache.CacheDataSink.Factory()
-        .setCache(cache)
-        .setFragmentSize(2 * 1024 * 1024)
-    val cached = CacheDataSource.Factory()
-        .setCache(cache)
-        .setUpstreamDataSourceFactory(http)
-        .setCacheWriteDataSinkFactory(sink)
-        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
     val mime = if (Extract.isDash(s.url)) MimeTypes.APPLICATION_MPD else MimeTypes.APPLICATION_M3U8
     val item = MediaItem.Builder().setUri(s.url).setMimeType(mime).build()
-    return DefaultMediaSourceFactory(cached).createMediaSource(item)
+    return DefaultMediaSourceFactory(DefaultDataSource.Factory(context, http)).createMediaSource(item)
 }
