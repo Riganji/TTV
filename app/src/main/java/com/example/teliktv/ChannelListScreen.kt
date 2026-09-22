@@ -19,10 +19,12 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.input.key.Key
@@ -53,10 +55,12 @@ fun ChannelListScreen(
     onUpdate: () -> Unit,
 ) {
     val now = rememberNow()
+    val context = LocalContext.current
     val group = groupIndex.coerceIn(0, Groups.names.size - 1)
     val visible = remember(channels, favorites, group) { Groups.channelsFor(group, channels, favorites) }
     var showReport by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var maxBufferSec by remember { mutableIntStateOf(PlayerPrefs.getMaxBufferSec(context)) }
     BackHandler(enabled = showReport || showSettings) {
         if (showReport) showReport = false else showSettings = false
     }
@@ -184,6 +188,16 @@ fun ChannelListScreen(
                 epgStatus = epgStatus,
                 failures = failures,
                 update = update,
+                maxBufferSec = maxBufferSec,
+                onBufferCycle = {
+                    val next = PlayerPrefs.next(maxBufferSec)
+                    PlayerPrefs.setMaxBufferSec(context, next)
+                    maxBufferSec = next
+                },
+                // Пауза только в плеере, не в списке каналов.
+                paused = null,
+                onTogglePause = null,
+                onGoLive = null,
                 onRefreshChannels = {
                     showSettings = false
                     onRefresh()

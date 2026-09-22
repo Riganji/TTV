@@ -269,19 +269,31 @@ fun PlayerScreen(
 
     /** В прямой эфир: seek на live edge + очистка дискового кэша. */
     fun goLive() {
-        if (System.currentTimeMillis() < detailIgnoreOkUntil) return
+        // Не блокируем аварийный выход из timeshift таймаутом ignore.
         paused = false
         inTimeshift = false
         timeshiftUi = false
         timelineFocused = false
         timeshiftIoRetries = 0
-        StreamCache.clear()
-        loadedBytesRef.set(0L)
         pauseBaseBytes = 0L
+        pauseStartedAt = 0L
+        loadedBytesRef.set(0L)
         cacheUsedMb = "кэш: 0.0 МБ"
         shiftLabel = "−0:00"
-        exo.seekToDefaultPosition()
-        exo.playWhenReady = true
+        try {
+            StreamCache.clear()
+        } catch (_: Exception) {
+        }
+        try {
+            exo.seekToDefaultPosition()
+            exo.prepare()
+            exo.playWhenReady = true
+        } catch (_: Exception) {
+            try {
+                nonce++
+            } catch (_: Exception) {
+            }
+        }
         notice = "прямой эфир"
     }
 
@@ -292,37 +304,65 @@ fun PlayerScreen(
         return exo.totalBufferedDuration.coerceAtLeast(0L)
     }
 
+    /** Любое действие timeshift, если лимит превышен или плеер падает — в эфир, без краша. */
+    fun safeTimeshift(action: () -> Unit) {
+        try {
+            val limitMs = maxBufferSec * 1000L
+            val overByPlayer = realBehindMs() > limitMs + 3_000L
+            val overByWall = pauseStartedAt > 0L &&
+                (System.currentTimeMillis() - pauseStartedAt) > limitMs + 5_000L
+            if (inTimeshift && (overByPlayer || overByWall)) {
+                notice = "лимит timeshift исчерпан — прямой эфир"
+                goLive()
+                return
+            }
+            action()
+        } catch (_: Exception) {
+            notice = "сбой timeshift — прямой эфир"
+            try {
+                goLive()
+            } catch (_: Exception) {
+                paused = false
+                inTimeshift = false
+                timeshiftUi = false
+                timelineFocused = false
+            }
+        }
+    }
+
     /** Пауза / продолжить. Вход в паузу включает timeshift и карточку плеера. */
     fun togglePause() {
         if (error != null || stream == null) return
         // Не срабатываем от того же OK, которым только что открыли карточку.
         if (System.currentTimeMillis() < detailIgnoreOkUntil) return
-        if (paused) {
-            // Продолжить с текущей позиции timeshift (не уходим в эфир).
-            paused = false
-            detail = false
-            exo.playWhenReady = true
-        } else if (
-            inTimeshift ||
-            exo.isPlaying ||
-            exo.playbackState == Player.STATE_READY ||
-            exo.playbackState == Player.STATE_BUFFERING
-        ) {
-            if (!inTimeshift) {
-                pauseBaseBytes = estimateBytesNow().coerceAtLeast(1L)
-                pauseStartedAt = System.currentTimeMillis()
-                inTimeshift = true
-                timeshiftIoRetries = 0
+        safeTimeshift {
+            if (paused) {
+                // Продолжить с текущей позиции timeshift (не уходим в эфир).
+                paused = false
+                detail = false
+                exo.playWhenReady = true
+            } else if (
+                inTimeshift ||
+                exo.isPlaying ||
+                exo.playbackState == Player.STATE_READY ||
+                exo.playbackState == Player.STATE_BUFFERING
+            ) {
+                if (!inTimeshift) {
+                    pauseBaseBytes = estimateBytesNow().coerceAtLeast(1L)
+                    pauseStartedAt = System.currentTimeMillis()
+                    inTimeshift = true
+                    timeshiftIoRetries = 0
+                }
+                detail = false
+                paused = true
+                timeshiftUi = true
+                timelineFocused = false
+                exo.playWhenReady = false
+                val behind = realBehindMs()
+                shiftLabel = formatShift(behind)
+                val mb = (behind / 1000.0 * PlayerPrefs.MB_PER_SEC).coerceAtLeast(0.1)
+                cacheUsedMb = "кэш: ${"%.1f".format(mb)} МБ"
             }
-            detail = false
-            paused = true
-            timeshiftUi = true
-            timelineFocused = false
-            exo.playWhenReady = false
-            val behind = realBehindMs()
-            shiftLabel = formatShift(behind)
-            val mb = (behind / 1000.0 * PlayerPrefs.MB_PER_SEC).coerceAtLeast(0.1)
-            cacheUsedMb = "кэш: ${"%.1f".format(mb)} МБ"
         }
     }
 
@@ -333,37 +373,36 @@ fun PlayerScreen(
      */
     fun seekBy(deltaMs: Long) {
         if (!inTimeshift || error != null) return
-        if (!exo.isCurrentMediaItemSeekable) {
-            notice = "перемотка недоступна на этом потоке"
-            return
+        safeTimeshift {
+            if (!exo.isCurrentMediaItemSeekable) {
+                notice = "перемотка недоступна на этом потоке"
+                return@safeTimeshift
+            }
+            val pos = exo.currentPosition
+            val behind = realBehindMs()
+            val bufferedEnd = exo.bufferedPosition
+            val minPos = (pos - behind).coerceAtLeast(0L)
+            val maxPos = when {
+                bufferedEnd > pos -> bufferedEnd
+                behind > 0L -> pos + behind
+                else -> pos
+            }
+            val target = (pos + deltaMs).coerceIn(minPos, maxPos)
+            if (kotlin.math.abs(target - pos) < 400L) {
+                notice = if (deltaMs < 0) "начало доступного timeshift" else "край / эфир"
+                return@safeTimeshift
+            }
+            exo.seekTo(target)
+            val off = exo.currentLiveOffset
+            shiftLabel = formatShift(
+                when {
+                    off != C.TIME_UNSET && off > 0L -> off
+                    else -> (maxPos - target).coerceAtLeast(0L)
+                },
+            )
+            val mb = (realBehindMs() / 1000.0 * PlayerPrefs.MB_PER_SEC).coerceAtLeast(0.1)
+            cacheUsedMb = "кэш: ${"%.1f".format(mb)} МБ"
         }
-        val pos = exo.currentPosition
-        val behind = realBehindMs()
-        val bufferedEnd = exo.bufferedPosition
-        // Назад: не дальше, чем текущий отступ от эфира (и не меньше 0).
-        // Вперёд: к эфиру (уменьшаем behind) или к bufferedEnd.
-        val minPos = (pos - behind).coerceAtLeast(0L)
-        val maxPos = when {
-            bufferedEnd > pos -> bufferedEnd
-            behind > 0L -> pos + behind  // запас к live edge
-            else -> pos
-        }
-        val target = (pos + deltaMs).coerceIn(minPos, maxPos)
-        if (kotlin.math.abs(target - pos) < 400L) {
-            notice = if (deltaMs < 0) "начало доступного timeshift" else "край / эфир"
-            return
-        }
-        exo.seekTo(target)
-        // Обновим подпись после seek (liveOffset пересчитает плеер).
-        val off = exo.currentLiveOffset
-        shiftLabel = formatShift(
-            when {
-                off != C.TIME_UNSET && off > 0L -> off
-                else -> (maxPos - target).coerceAtLeast(0L)
-            },
-        )
-        val mb = (realBehindMs() / 1000.0 * PlayerPrefs.MB_PER_SEC).coerceAtLeast(0.1)
-        cacheUsedMb = "кэш: ${"%.1f".format(mb)} МБ"
     }
 
 
@@ -532,11 +571,22 @@ fun PlayerScreen(
         }
     }
 
-    // Счётчик только от реальных данных плеера (не wall-clock).
-    LaunchedEffect(inTimeshift) {
+    // Счётчик + защита: если пауза дольше лимита — сами в эфир (иначе краш на действиях).
+    LaunchedEffect(inTimeshift, maxBufferSec) {
         if (!inTimeshift) return@LaunchedEffect
         while (true) {
-            val behindMs = realBehindMs()
+            val behindMs = try {
+                realBehindMs()
+            } catch (_: Exception) {
+                -1L
+            }
+            val limitMs = maxBufferSec * 1000L
+            val wall = if (pauseStartedAt > 0L) System.currentTimeMillis() - pauseStartedAt else 0L
+            if (behindMs < 0L || behindMs > limitMs + 3_000L || wall > limitMs + 5_000L) {
+                notice = "лимит timeshift исчерпан — прямой эфир"
+                goLive()
+                break
+            }
             shiftLabel = formatShift(behindMs)
             val mb = (behindMs / 1000.0 * PlayerPrefs.MB_PER_SEC).coerceAtLeast(0.1)
             cacheUsedMb = "кэш: ${"%.1f".format(mb)} МБ"
@@ -1054,15 +1104,10 @@ fun PlayerScreen(
                             maxBufferSec = next
                             notice = "кэш: ${PlayerPrefs.hint(next)}"
                         },
-                        paused = paused,
-                        onTogglePause = {
-                            togglePause()
-                            panel = PlayerPanel.None
-                        },
-                        onGoLive = {
-                            goLive()
-                            panel = PlayerPanel.None
-                        },
+                        // Пауза только в карточке timeshift / OK, не в настройках.
+                        paused = null,
+                        onTogglePause = null,
+                        onGoLive = null,
                         onRefreshChannels = {
                             panel = PlayerPanel.None
                             onRefresh()
